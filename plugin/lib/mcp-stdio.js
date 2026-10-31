@@ -164,6 +164,271 @@ function textResult(text, isError = false) {
 		...isError ? { isError: true } : {}
 	};
 }
+/**
+* 启发式估算（零依赖，误差约 ±15%）。
+* 依据：中文约 1 token/字，英文约 4 字符/token，代码约 3 字符/token。
+*/
+function estimateTokensHeuristic(text) {
+	if (!text) return 0;
+	let cjk = 0;
+	let ascii = 0;
+	let other = 0;
+	for (let i = 0; i < text.length; i++) {
+		const c = text.charCodeAt(i);
+		if (c < 128) ascii++;
+		else if (c >= 19968 && c <= 40959 || c >= 13312 && c <= 19903 || c >= 12352 && c <= 12543 || c >= 12448 && c <= 12543 || c >= 12288 && c <= 12351 || c >= 65280 && c <= 65519 || c >= 44032 && c <= 55215) cjk++;
+		else other++;
+	}
+	return Math.ceil(cjk * 1 + ascii / 3.8 + other / 1.5);
+}
+/**
+* 估算 token 数。
+* 当前实现使用启发式（零依赖，跨平台稳定）。
+* 预留 tiktoken 接入点：若宿主环境提供精确分词，可通过 setEncoder 注入。
+*/
+function estimateTokens(text) {
+	return estimateTokensHeuristic(text);
+}
+/** 安全余量：预算按 92% 使用（留出客户端包装开销） */
+const BUDGET_SAFETY_RATIO = .92;
+/**
+* 解析「长度」输入——数字或人类可读字符串。
+*
+* 支持：`92000` / `'92k'` / `'92K'` / `'1.5m'` / `'1.2万'` / `'9万'` / `'128,000'`。
+* 返回 token 数；无法解析或非正数返回 undefined。
+*/
+function parseBudgetValue(v) {
+	if (v == null) return void 0;
+	if (typeof v === "number") return Number.isFinite(v) && v > 0 ? Math.floor(v) : void 0;
+	if (typeof v !== "string") return void 0;
+	const s = v.trim().toLowerCase().replace(/[,_\s]/g, "");
+	if (!s) return void 0;
+	const wan = s.match(/^(\d+(?:\.\d+)?)万$/);
+	if (wan) return Math.floor(parseFloat(wan[1]) * 1e4);
+	const km = s.match(/^(\d+(?:\.\d+)?)([km])$/);
+	if (km) {
+		const n = parseFloat(km[1]);
+		return Math.floor(km[2] === "k" ? n * 1e3 : n * 1e6);
+	}
+	if (/^\d+$/.test(s)) return parseInt(s, 10);
+}
+/** 默认预算（未指定模型/预算时） */
+const DEFAULT_BUDGET = 2e5;
+/** 硬上限：允许的最大预算（2M，覆盖 Gemini 1.5 Pro 等） */
+const MAX_BUDGET = 2e6;
+/**
+* 模型上下文长度预设表。
+*
+* 键为小写匹配片段（按顺序匹配，先具体后通用）。
+* 数值为**模型总上下文窗口**（不是可用输出），预算会再乘安全系数。
+*/
+const MODEL_CONTEXT_PRESETS = [
+	{
+		match: "claude-opus-4",
+		context: 2e5,
+		label: "Claude Opus 4"
+	},
+	{
+		match: "claude-sonnet-4",
+		context: 2e5,
+		label: "Claude Sonnet 4"
+	},
+	{
+		match: "claude-3-7",
+		context: 2e5,
+		label: "Claude 3.7"
+	},
+	{
+		match: "claude-3-5",
+		context: 2e5,
+		label: "Claude 3.5"
+	},
+	{
+		match: "claude",
+		context: 2e5,
+		label: "Claude"
+	},
+	{
+		match: "gpt-5",
+		context: 4e5,
+		label: "GPT-5"
+	},
+	{
+		match: "gpt-4.1",
+		context: 1e6,
+		label: "GPT-4.1"
+	},
+	{
+		match: "gpt-4o",
+		context: 128e3,
+		label: "GPT-4o"
+	},
+	{
+		match: "gpt-4-turbo",
+		context: 128e3,
+		label: "GPT-4 Turbo"
+	},
+	{
+		match: "gpt-4",
+		context: 128e3,
+		label: "GPT-4"
+	},
+	{
+		match: "o1",
+		context: 2e5,
+		label: "o1"
+	},
+	{
+		match: "o3",
+		context: 2e5,
+		label: "o3"
+	},
+	{
+		match: "gemini-2",
+		context: 1e6,
+		label: "Gemini 2"
+	},
+	{
+		match: "gemini-1.5-pro",
+		context: 2e6,
+		label: "Gemini 1.5 Pro"
+	},
+	{
+		match: "gemini",
+		context: 1e6,
+		label: "Gemini"
+	},
+	{
+		match: "deepseek-v4",
+		context: 256e3,
+		label: "DeepSeek V4"
+	},
+	{
+		match: "deepseek-v3",
+		context: 128e3,
+		label: "DeepSeek V3"
+	},
+	{
+		match: "deepseek",
+		context: 128e3,
+		label: "DeepSeek"
+	},
+	{
+		match: "glm-5",
+		context: 2e5,
+		label: "GLM-5"
+	},
+	{
+		match: "glm-4.6",
+		context: 2e5,
+		label: "GLM-4.6"
+	},
+	{
+		match: "glm-4",
+		context: 128e3,
+		label: "GLM-4"
+	},
+	{
+		match: "glm",
+		context: 128e3,
+		label: "GLM"
+	},
+	{
+		match: "kimi-k2",
+		context: 256e3,
+		label: "Kimi K2"
+	},
+	{
+		match: "kimi",
+		context: 128e3,
+		label: "Kimi"
+	},
+	{
+		match: "qwen",
+		context: 128e3,
+		label: "Qwen"
+	},
+	{
+		match: "minimax",
+		context: 2e5,
+		label: "MiniMax"
+	},
+	{
+		match: "doubao",
+		context: 128e3,
+		label: "豆包"
+	},
+	{
+		match: "hunyuan",
+		context: 128e3,
+		label: "混元"
+	},
+	{
+		match: "yi-",
+		context: 2e5,
+		label: "Yi"
+	},
+	{
+		match: "llama",
+		context: 128e3,
+		label: "Llama"
+	},
+	{
+		match: "mistral",
+		context: 128e3,
+		label: "Mistral"
+	}
+];
+/** 按模型名查上下文长度（未匹配返回 undefined） */
+function contextForModel(model) {
+	if (!model) return void 0;
+	const m = model.toLowerCase();
+	for (const p of MODEL_CONTEXT_PRESETS) if (m.includes(p.match)) return {
+		context: p.context,
+		label: p.label
+	};
+}
+/**
+* 解析预算。
+*
+* 优先级：显式 budget > 模型预设 > 默认 200k
+* budget 支持数字或字符串（'92k' / '1.2万'，见 parseBudgetValue）
+* 上限：MAX_BUDGET
+*/
+function resolveBudget(opts = {}) {
+	let requested;
+	let source;
+	let modelPreset;
+	const explicit = parseBudgetValue(opts.budget);
+	if (explicit != null) {
+		requested = explicit;
+		source = "explicit";
+	} else {
+		const preset = contextForModel(opts.model);
+		if (preset) {
+			requested = preset.context;
+			modelPreset = preset;
+			source = "model";
+		} else {
+			requested = DEFAULT_BUDGET;
+			source = "default";
+		}
+	}
+	let clamped = false;
+	if (requested > 2e6) {
+		requested = MAX_BUDGET;
+		clamped = true;
+		source = "clamped";
+	}
+	if (requested < 1) requested = 1;
+	return {
+		requested,
+		effective: Math.floor(requested * BUDGET_SAFETY_RATIO),
+		source,
+		modelPreset,
+		clamped
+	};
+}
 //#endregion
 //#region src/uir/helpers.ts
 /** 代码围栏 ```lang\n...\n``` */
@@ -222,6 +487,577 @@ function classifyText(text, opts = {}) {
 /** 是否为注入的上下文模板 */
 function isInjectedTemplate(text) {
 	return /^#\s*AGENTS\.md instructions/.test(text) || /^<environment_context>/.test(text) || /^<system-reminder>/.test(text) || /^<local-command-caveat>/.test(text) || /^Current runtime context\./.test(text) || /^Time sampled while preparing/.test(text);
+}
+//#endregion
+//#region src/budget/summarize.ts
+const FENCE_RE = /```[\w+-]*\n[\s\S]*?```/g;
+const INLINE_CODE_RE = /`[^`\n]{1,200}`/g;
+/**
+* 文件路径正则（保留给 extractProtected 使用；单行内联匹配）。
+*/
+const PATH_RE = /(?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"'<>|*?`，。；：、）】]+/g;
+/**
+* 报错信息正则。
+* 不要求行首（实测报错常出现在行中间），并覆盖常见形态：
+*   Error: / Exception: / FATAL / panic / Traceback / XXX failed / error C1234
+*/
+const ERROR_RE = /(?:\b(?:Error|ERROR|Exception|FATAL|FAILED|panic|Traceback)\b[:：]?\s*[^\n]{0,200}|\berror\s+[A-Z]{1,4}\d{3,5}[^\n]{0,150}|\b[A-Za-z_][\w.]*\s+failed\b[^\n]{0,150})/g;
+const VERSION_RE = /\bv?\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?\b/g;
+const CMD_RE = /\b(?:pwsh|powershell|bash|sh|cmd|node|npm|pnpm|yarn|npx|pip3?|python3?|git|gh|docker|cargo|make|cmake|dotnet|conda|uv|winget|choco)\s+(?:-[A-Za-z]+\s+)*[^\n]{3,300}/g;
+/** 提取必须逐字保留的技术片段 */
+function extractProtected(text) {
+	const out = [];
+	const push = (kind, arr) => {
+		if (!arr) return;
+		for (const m of arr) out.push({
+			kind,
+			text: m
+		});
+	};
+	push("code", text.match(FENCE_RE));
+	push("inline-code", text.match(INLINE_CODE_RE));
+	push("path", text.match(PATH_RE));
+	push("error", text.match(ERROR_RE));
+	push("version", text.match(VERSION_RE));
+	const seen = /* @__PURE__ */ new Set();
+	return out.filter((p) => {
+		const k = p.kind + "\0" + p.text;
+		if (seen.has(k)) return false;
+		seen.add(k);
+		return true;
+	});
+}
+/**
+* 把 UIR 会话压缩成不超过预算的上下文文本。
+*
+* 预算来源优先级：opts.budget > opts.model 预设 > 默认 200k
+*/
+function summarizeSession(session, opts = {}) {
+	const budgetInfo = resolveBudget({
+		budget: opts.budget,
+		model: opts.model
+	});
+	const budget = budgetInfo.effective;
+	const fidelity = opts.fidelity ?? "balanced";
+	const stats = {
+		originalTokens: 0,
+		returnedTokens: 0,
+		compressionRatio: 1,
+		level: "L0",
+		dropped: {
+			narrative: 0,
+			duplicates: 0,
+			injected: 0,
+			reasoning: 0
+		},
+		preserved: {
+			codeBlocks: 0,
+			commands: 0,
+			paths: 0,
+			errors: 0,
+			toolCalls: 0
+		},
+		summarized: false
+	};
+	const originalText = renderFull(session);
+	stats.originalTokens = estimateTokens(originalText);
+	collectPreservedStats(session, stats);
+	if (session.turns.length === 0) {
+		stats.returnedTokens = stats.originalTokens;
+		stats.level = "L3";
+		return {
+			context: originalText + "\n\n（无对话内容）",
+			outline: [],
+			stats,
+			budget: budgetInfo
+		};
+	}
+	const foldCount = opts.maxTurns != null && Number.isFinite(opts.maxTurns) && opts.maxTurns >= 1 ? Math.max(0, session.turns.length - Math.floor(opts.maxTurns)) : 0;
+	if (foldCount === 0 && (stats.originalTokens <= budget || fidelity === "full" && stats.originalTokens <= budget * 1.05)) {
+		stats.returnedTokens = stats.originalTokens;
+		stats.level = "L0";
+		return {
+			context: originalText,
+			outline: buildOutline(session),
+			stats,
+			budget: budgetInfo
+		};
+	}
+	const l1 = applyL1(session, stats);
+	const l1Text = renderFull(l1);
+	const l1Tokens = estimateTokens(l1Text);
+	if (foldCount === 0 && l1Tokens <= budget) {
+		stats.returnedTokens = l1Tokens;
+		stats.level = "L1";
+		stats.summarized = true;
+		finishRatio(stats);
+		return {
+			context: l1Text,
+			outline: buildOutline(l1),
+			stats,
+			budget: budgetInfo
+		};
+	}
+	const { context, level } = applyL2L3(l1, budget, fidelity, opts.focus ?? [], stats, foldCount);
+	stats.returnedTokens = estimateTokens(context);
+	stats.level = level;
+	stats.summarized = true;
+	if (foldCount > 0) stats.maxTurnsApplied = {
+		total: session.turns.length,
+		kept: session.turns.length - foldCount
+	};
+	finishRatio(stats);
+	return {
+		context,
+		outline: buildOutline(session),
+		stats,
+		budget: budgetInfo
+	};
+}
+function finishRatio(stats) {
+	stats.compressionRatio = stats.originalTokens > 0 ? Math.round(stats.returnedTokens / stats.originalTokens * 1e3) / 1e3 : 1;
+}
+/** 剥离注入模板 + 相邻重复去重 */
+function applyL1(session, stats) {
+	const out = {
+		...session,
+		turns: []
+	};
+	const seenTexts = /* @__PURE__ */ new Set();
+	for (const turn of session.turns) {
+		const newTurn = {
+			...turn,
+			userMessages: [],
+			steps: []
+		};
+		for (const b of turn.userMessages) {
+			if (b.kind === "text") {
+				if (isInjectedTemplate(b.text)) {
+					stats.dropped.injected += b.text.length;
+					continue;
+				}
+				const key = b.text.trim();
+				if (key.length > 40 && seenTexts.has(key)) {
+					stats.dropped.duplicates += b.text.length;
+					continue;
+				}
+				if (key.length > 40) seenTexts.add(key);
+			}
+			newTurn.userMessages.push(b);
+		}
+		for (const step of turn.steps) {
+			const newStep = {
+				...step,
+				blocks: []
+			};
+			for (const b of step.blocks) {
+				if (b.kind === "text" && isInjectedTemplate(b.text)) {
+					stats.dropped.injected += b.text.length;
+					continue;
+				}
+				newStep.blocks.push(b);
+			}
+			newTurn.steps.push(newStep);
+		}
+		out.turns.push(newTurn);
+	}
+	return out;
+}
+function applyL2L3(session, budget, fidelity, focus, stats, foldCount = 0) {
+	const turns = session.turns;
+	const n = turns.length;
+	if (n === 0) return {
+		context: renderHeader(session, stats) + "\n\n（无对话内容）",
+		level: "L3"
+	};
+	const headerText = renderHeader(session, stats);
+	const techIndexReserve = Math.min(Math.floor(budget * .18), 3e4);
+	let remaining = budget - estimateTokens(headerText) - techIndexReserve - 200;
+	const fullTexts = turns.map(renderTurnFull);
+	const l2EstCache = /* @__PURE__ */ new Map();
+	const l2CostOf = (i) => {
+		let tokens = l2EstCache.get(i);
+		if (tokens === void 0) {
+			const cloneStats = {
+				...stats,
+				dropped: { ...stats.dropped },
+				preserved: { ...stats.preserved }
+			};
+			tokens = estimateTokens(renderTurnL2(turns[i], focus, cloneStats));
+			l2EstCache.set(i, tokens);
+		}
+		return tokens;
+	};
+	const costs = turns.map((t, i) => ({
+		turn: t,
+		fullTokens: estimateTokens(fullTexts[i]),
+		plan: "L3"
+	}));
+	const recentStart = Math.max(0, n - 3);
+	for (let i = n - 1; i >= Math.max(recentStart, foldCount); i--) if (costs[i].fullTokens <= remaining) {
+		costs[i].plan = "L0";
+		remaining -= costs[i].fullTokens;
+	}
+	for (let i = recentStart - 1; i >= foldCount; i--) {
+		if (costs[i].plan !== "L3") continue;
+		if (l2CostOf(i) <= remaining) {
+			costs[i].plan = "L2";
+			remaining -= l2CostOf(i);
+		}
+	}
+	let upgraded = true;
+	while (upgraded && remaining > 500) {
+		upgraded = false;
+		for (let i = n - 1; i >= foldCount; i--) {
+			if (costs[i].plan !== "L2") continue;
+			const delta = costs[i].fullTokens - l2CostOf(i);
+			if (delta <= remaining) {
+				costs[i].plan = "L0";
+				remaining -= delta;
+				upgraded = true;
+				break;
+			}
+		}
+		if (upgraded) continue;
+		for (let i = n - 1; i >= foldCount; i--) {
+			if (costs[i].plan !== "L3") continue;
+			if (l2CostOf(i) <= remaining) {
+				costs[i].plan = "L2";
+				remaining -= l2CostOf(i);
+				upgraded = true;
+				break;
+			}
+		}
+	}
+	const parts = [headerText];
+	const earlyTurns = costs.filter((c) => c.plan === "L3");
+	if (earlyTurns.length > 0) parts.push(renderEarlySummary(earlyTurns.map((c) => c.turn)));
+	for (let i = 0; i < n; i++) {
+		const plan = costs[i].plan;
+		if (plan === "L3") continue;
+		if (plan === "L0") parts.push(fullTexts[i]);
+		else parts.push(renderTurnL2(turns[i], focus, stats));
+	}
+	const techIndex = buildTechIndex(session, Math.max(techIndexReserve, remaining));
+	if (techIndex.text) {
+		parts.push(techIndex.text);
+		stats.preserved.techIndexEntries = techIndex.count;
+	}
+	return {
+		context: parts.join("\n\n"),
+		level: "L2"
+	};
+}
+/**
+* 构建「技术索引」——全文去重后的关键片段清单。
+*
+* 为什么需要：轮次级折叠（L3）会丢掉早期轮次的文本，
+* 但其中的路径/命令/报错/版本号是用户明确要求「不能丢」的技术细节。
+* 把它们去重后集中列出，用极小空间保住关键信息。
+*/
+function buildTechIndex(session, remainingTokens) {
+	if (remainingTokens < 300) return {
+		text: "",
+		count: 0
+	};
+	const paths = /* @__PURE__ */ new Set();
+	const commands = /* @__PURE__ */ new Set();
+	const errors = /* @__PURE__ */ new Set();
+	const versions = /* @__PURE__ */ new Set();
+	const collect = (text) => {
+		if (!text) return;
+		for (const p of text.match(PATH_RE) ?? []) {
+			const t = p.trim();
+			if (t.length >= 8 && t.length <= 300) paths.add(t);
+		}
+		for (const c of text.match(CMD_RE) ?? []) {
+			const t = c.trim();
+			if (t.length >= 6 && t.length <= 300) commands.add(t);
+		}
+		for (const e of text.match(ERROR_RE) ?? []) {
+			const t = e.trim();
+			if (t.length >= 10 && t.length <= 400) errors.add(t);
+		}
+		for (const v of text.match(VERSION_RE) ?? []) if (/^\d+\.\d+/.test(v)) versions.add(v);
+	};
+	for (const turn of session.turns) {
+		for (const b of turn.userMessages) if (b.kind === "text") collect(b.text);
+		for (const step of turn.steps) {
+			if (step.reasoning) collect(step.reasoning);
+			for (const b of step.blocks) if (b.kind === "text") collect(b.text);
+			else if (b.kind === "tool-call") collect(b.rawArgs ?? JSON.stringify(b.args ?? {}));
+			else if (b.kind === "tool-result") collect(b.output.text);
+			else if (b.kind === "file-change") {
+				paths.add(b.path);
+				if (b.diff) collect(b.diff);
+			}
+		}
+	}
+	const sections = [];
+	let count = 0;
+	const budgetChars = Math.floor(remainingTokens * 3.5);
+	let used = 0;
+	const addSection = (title, items, maxItems) => {
+		if (items.length === 0) return;
+		const picked = [];
+		for (const it of items.slice(0, maxItems)) {
+			if (used + it.length + 4 > budgetChars - 40) break;
+			picked.push(it);
+			used += it.length + 4;
+		}
+		if (picked.length === 0) return;
+		sections.push(`### ${title}（${picked.length}${picked.length < items.length ? ` / 共 ${items.length}` : ""}）\n` + picked.map((x) => `- \`${x}\``).join("\n"));
+		count += picked.length;
+	};
+	const fileNames = /* @__PURE__ */ new Set();
+	const dirPaths = /* @__PURE__ */ new Set();
+	for (const p of paths) {
+		const segs = p.split(/[\\/]+/).filter(Boolean);
+		if (segs.length === 0) continue;
+		const base = segs[segs.length - 1];
+		if (base && base.includes(".") && base.length <= 80) fileNames.add(base);
+		if (segs.length >= 3) {
+			const dir = segs.slice(0, -1).join("\\");
+			if (dir.length >= 8 && dir.length <= 200) dirPaths.add(dir);
+		}
+	}
+	addSection("报错信息", [...errors], 300);
+	addSection("执行过的命令", [...commands], 500);
+	addSection("涉及的文件", [...fileNames].sort((a, b) => a.localeCompare(b)), 3e3);
+	addSection("关键目录", [...dirPaths].sort((a, b) => a.length - b.length), 2e3);
+	addSection("版本号", [...versions].sort(), 500);
+	if (sections.length === 0) return {
+		text: "",
+		count: 0
+	};
+	return {
+		text: `\n## 技术索引（全文去重保留）\n\n${sections.join("\n\n")}`,
+		count
+	};
+}
+function renderHeader(session, stats) {
+	const d = new Date(session.createdAt);
+	const dateStr = Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 16).replace("T", " ") : "未知时间";
+	return [
+		`# 会话上下文：${session.title || "(无标题)"}`,
+		`> 来源 ${session.origin.client} · ${dateStr} · 工作目录 ${session.cwd || "(未知)"}`,
+		`> 原始约 ${stats.originalTokens} tokens（压缩后见文末统计）`
+	].join("\n");
+}
+/** L0：完整渲染 */
+function renderFull(session) {
+	const parts = [`# 会话上下文：${session.title || "(无标题)"}`];
+	parts.push(`> 来源 ${session.origin.client} · 工作目录 ${session.cwd || "(未知)"}`);
+	for (const turn of session.turns) parts.push(renderTurnFull(turn));
+	return parts.join("\n\n");
+}
+function renderTurnFull(turn) {
+	const lines = [`## 第 ${turn.index + 1} 轮`];
+	for (const b of turn.userMessages) if (b.kind === "text") lines.push(`**用户**：${demoteHeadings(b.text)}`);
+	for (const step of turn.steps) for (const b of step.blocks) lines.push(renderBlockFull(b));
+	return lines.filter(Boolean).join("\n");
+}
+function renderBlockFull(b) {
+	switch (b.kind) {
+		case "text": return b.role === "assistant" ? `**助手**：${demoteHeadings(b.text)}` : `**${b.role}**：${demoteHeadings(b.text)}`;
+		case "reasoning": return b.encrypted ? `> [加密思考 · 无法解码 · ${b.encryptedBytes ?? 0} 字节]` : `> 💭 ${b.text}`;
+		case "tool-call": return `- 🔧 \`${b.name}\`(${b.rawArgs ?? JSON.stringify(b.args ?? {})})`;
+		case "tool-result": return `- ${b.isError ? "⚠️" : "✅"} 结果：${b.output.text}`;
+		case "file-change": return `- 📝 ${b.operation} \`${b.path}\`${b.diff ? "\n```diff\n" + b.diff + "\n```" : ""}`;
+		case "image": return `- 🖼 图片 (${b.mime})`;
+		case "compaction": return `- 🗜 上下文压缩：${b.summary}`;
+		default: return "";
+	}
+}
+/**
+* L2：结构化渲染 —— 保留 P0 片段，压缩叙述。
+*/
+function renderTurnL2(turn, focus, stats) {
+	const lines = [`## 第 ${turn.index + 1} 轮（摘要）`];
+	for (const b of turn.userMessages) if (b.kind === "text") lines.push(`**用户**：${demoteHeadings(truncatePreservingTech(b.text, 1500, stats))}`);
+	for (const step of turn.steps) {
+		if (step.reasoning) {
+			const conclusion = extractConclusion(step.reasoning);
+			if (conclusion) {
+				stats.dropped.reasoning += Math.max(0, step.reasoning.length - conclusion.length);
+				lines.push(`> 💭 ${conclusion}`);
+			}
+		}
+		for (const b of step.blocks) switch (b.kind) {
+			case "text": {
+				if (b.role !== "assistant") break;
+				const compressed = compressText(b.text, focus, stats);
+				if (compressed) lines.push(`**助手**：${demoteHeadings(compressed)}`);
+				break;
+			}
+			case "reasoning": {
+				if (b.encrypted) break;
+				const conclusion = extractConclusion(b.text);
+				if (conclusion) {
+					stats.dropped.reasoning += Math.max(0, b.text.length - conclusion.length);
+					lines.push(`> 💭 ${conclusion}`);
+				}
+				break;
+			}
+			case "tool-call":
+				lines.push(`- 🔧 \`${b.name}\` ${truncate(b.rawArgs ?? JSON.stringify(b.args ?? {}), 800)}`);
+				break;
+			case "tool-result": {
+				const out = b.output.text;
+				const preserved = truncatePreservingTech(out, 4e3, stats);
+				lines.push(`  ${b.isError ? "⚠️ 错误" : "✅"}：${preserved}`);
+				break;
+			}
+			case "file-change":
+				lines.push(`- 📝 ${b.operation} \`${b.path}\``);
+				break;
+			case "image":
+				lines.push(`- 🖼 图片 (${b.mime})`);
+				break;
+			default: break;
+		}
+	}
+	return lines.join("\n");
+}
+/** L3：早期轮次折叠 */
+function renderEarlySummary(turns) {
+	if (turns.length === 0) return "";
+	const first = turns[0].index + 1;
+	const last = turns[turns.length - 1].index + 1;
+	const intents = [];
+	const files = /* @__PURE__ */ new Set();
+	const tools = /* @__PURE__ */ new Set();
+	for (const t of turns) {
+		for (const b of t.userMessages) if (b.kind === "text") {
+			const s = b.text.replace(/\s+/g, " ").trim().slice(0, 60);
+			if (s) intents.push(s);
+		}
+		for (const step of t.steps) for (const b of step.blocks) {
+			if (b.kind === "tool-call") tools.add(b.name);
+			if (b.kind === "file-change") files.add(b.path);
+		}
+	}
+	const lines = [`## 概览（第 ${first}–${last} 轮，已折叠）`, intents.length > 0 ? `- 用户诉求：${[...new Set(intents)].slice(0, 8).map((s) => `「${s}」`).join("、")}` : "- （无明确诉求记录）"];
+	if (files.size > 0) lines.push(`- 涉及文件：${[...files].slice(0, 15).map((f) => `\`${f}\``).join("、")}${files.size > 15 ? ` 等 ${files.size} 个` : ""}`);
+	if (tools.size > 0) lines.push(`- 使用工具：${[...tools].join("、")}`);
+	return lines.join("\n");
+}
+/** 压缩叙述性文本：保留 P0 片段 + 首尾句 */
+function compressText(text, focus, stats) {
+	const f = analyzeText(text);
+	if (text.length <= 400) return text;
+	const techScore = f.codeBlocks * 10 + f.paths * 3 + f.errors * 8 + f.commands * 5;
+	const keepChars = techScore > 10 ? 2e3 : techScore > 3 ? 1200 : 600;
+	if (text.length <= keepChars) return text;
+	const protectedPieces = extractProtected(text);
+	const head = text.slice(0, Math.floor(keepChars * .6));
+	const tail = text.slice(-Math.floor(keepChars * .25));
+	const focusHits = [];
+	for (const kw of focus) {
+		if (!kw) continue;
+		let from = 0;
+		for (let k = 0; k < 3; k++) {
+			const idx = text.indexOf(kw, from);
+			if (idx < 0) break;
+			focusHits.push(text.slice(Math.max(0, idx - 100), Math.min(text.length, idx + 300)));
+			from = idx + kw.length;
+		}
+	}
+	const droppedChars = text.length - (head.length + tail.length);
+	stats.dropped.narrative += Math.max(0, droppedChars);
+	const pieces = [head.trim()];
+	if (focusHits.length > 0) pieces.push(`[关注点片段]\n${focusHits.join("\n…\n")}`);
+	const missing = protectedPieces.filter((p) => !head.includes(p.text) && !tail.includes(p.text));
+	if (missing.length > 0) pieces.push(`[关键细节]\n${missing.slice(0, 20).map((p) => p.text).join("\n")}`);
+	pieces.push("…（此处省略部分叙述）…");
+	pieces.push(tail.trim());
+	return pieces.join("\n");
+}
+/** 截断但保留技术细节 */
+function truncatePreservingTech(text, max, stats) {
+	if (text.length <= max) return text;
+	const head = text.slice(0, Math.floor(max * .7));
+	const tail = text.slice(-Math.floor(max * .25));
+	const missing = extractProtected(text).filter((p) => !head.includes(p.text) && !tail.includes(p.text));
+	stats.dropped.narrative += Math.max(0, text.length - head.length - tail.length);
+	let out = `${head.trim()}\n…（省略 ${text.length - head.length - tail.length} 字符）…\n${tail.trim()}`;
+	if (missing.length > 0) out += `\n[关键细节]\n${missing.slice(0, 15).map((p) => p.text).join("\n")}`;
+	return out;
+}
+/** 提取思考的结论句（最后一段判断性语句） */
+function extractConclusion(reasoning) {
+	if (!reasoning) return "";
+	if (reasoning.length <= 300) return reasoning.trim();
+	const lastParas = reasoning.split(/\n{2,}/).filter((p) => p.trim()).slice(-2).join("\n");
+	const conclusion = lastParas.split(/(?<=[。.!?！？])\s+/).filter((s) => s.trim()).slice(-3).join(" ").trim();
+	return conclusion.length > 20 ? conclusion.slice(0, 800) : lastParas.slice(0, 500).trim();
+}
+function truncate(s, max) {
+	if (!s) return "";
+	if (s.length <= max) return s;
+	return s.slice(0, max) + `…（省略 ${s.length - max} 字符）`;
+}
+/**
+* 降级原文里的 Markdown 标题，避免和本引擎的 `## 第 N 轮` 结构混淆。
+* 做法：把行首的 `#` 替换为 `▪`（保留视觉层级感，但不被解析为标题）。
+*/
+function demoteHeadings(text) {
+	if (!text) return text;
+	return text.replace(/^(\s{0,3})(#{1,6})(\s+)/gm, (_m, indent, hashes, space) => `${indent}${"▪".repeat(hashes.length)}${space}`);
+}
+function collectPreservedStats(session, stats) {
+	for (const turn of session.turns) {
+		for (const b of turn.userMessages) if (b.kind === "text") {
+			const f = analyzeText(b.text);
+			stats.preserved.paths += f.paths;
+			stats.preserved.errors += f.errors;
+			stats.preserved.codeBlocks += f.codeBlocks;
+			stats.preserved.commands += f.commands;
+		}
+		for (const step of turn.steps) for (const b of step.blocks) {
+			if (b.kind === "tool-call") stats.preserved.toolCalls++;
+			if (b.kind === "text") {
+				const f = analyzeText(b.text);
+				stats.preserved.paths += f.paths;
+				stats.preserved.errors += f.errors;
+				stats.preserved.codeBlocks += f.codeBlocks;
+				stats.preserved.commands += f.commands;
+			}
+			if (b.kind === "tool-result") {
+				const f = analyzeText(b.output.text);
+				stats.preserved.paths += f.paths;
+				stats.preserved.errors += f.errors;
+			}
+		}
+	}
+}
+function buildOutline(session) {
+	return session.turns.map((t) => {
+		let intent = "";
+		const files = /* @__PURE__ */ new Set();
+		const tools = /* @__PURE__ */ new Set();
+		for (const b of t.userMessages) if (b.kind === "text" && !intent) intent = b.text.replace(/\s+/g, " ").trim().slice(0, 100);
+		for (const step of t.steps) for (const b of step.blocks) {
+			if (b.kind === "tool-call") tools.add(b.name);
+			if (b.kind === "file-change") files.add(b.path);
+		}
+		return {
+			turn: t.index + 1,
+			intent,
+			files: [...files],
+			tools: [...tools]
+		};
+	});
+}
+/** 生成统计摘要（人类可读） */
+function formatStats(stats) {
+	const pct = (n) => `${Math.round(n * 100)}%`;
+	return [
+		`原始 ${stats.originalTokens} tokens → 返回 ${stats.returnedTokens} tokens（保留 ${pct(stats.compressionRatio)}）`,
+		`压缩级别 ${stats.level}${stats.summarized ? "（已摘要）" : "（未摘要）"}`,
+		`保留：代码块 ${stats.preserved.codeBlocks} · 命令 ${stats.preserved.commands} · 路径 ${stats.preserved.paths} · 报错 ${stats.preserved.errors} · 工具调用 ${stats.preserved.toolCalls}`,
+		`丢弃：注入模板 ${stats.dropped.injected} 字符 · 重复 ${stats.dropped.duplicates} 字符 · 叙述 ${stats.dropped.narrative} 字符 · 思考 ${stats.dropped.reasoning} 字符`
+	].join("\n");
 }
 //#endregion
 //#region src/host/clients.ts
@@ -1356,6 +2192,70 @@ function normalizeHeader(o) {
 	};
 }
 /**
+* 轻量读取会话概要 —— 专为列表页设计（速度优化）。
+*
+* 与 readDshSessionFile 的区别：解压后**不做全量 JSON.parse**，
+* 只对 header 行、title 事件、首条有效 user/message 行做解析；
+* turn 数用子串计数（事件一行一条，`"turn/start"` 作为 type 值只在事件行出现）。
+* 实测把 98 个会话的列表读取从 ~2.3s 降到 ~0.4s。
+*/
+function peekDshSessionFile(filePath) {
+	const buf = fs.readFileSync(filePath);
+	const cuts = findFrameOffsets(buf);
+	if (cuts.length === 0) throw new BridgeError("FILE_CORRUPTED", void 0, { file: filePath });
+	const warnings = [];
+	let text = "";
+	for (let i = 0; i < cuts.length; i++) {
+		const chunk = buf.subarray(cuts[i], cuts[i + 1] ?? buf.length);
+		try {
+			text += zlib.zstdDecompressSync(chunk).toString("utf8");
+		} catch {
+			warnings.push(i < cuts.length - 1 ? `第 ${i + 1} 个数据帧损坏，已跳过` : "最后一个数据帧不完整（可能是写入中断），已跳过");
+		}
+	}
+	const rows = text.split("\n");
+	let header = null;
+	let title = "";
+	let turns = 0;
+	let firstUserText = "";
+	for (let i = 0; i < rows.length; i++) {
+		const line = rows[i];
+		if (!line.trim()) continue;
+		if (i === 0 && !header) try {
+			const o = JSON.parse(line);
+			if (o.type === "session" || typeof o.version === "number" && typeof o.id === "string") {
+				header = normalizeHeader(o);
+				continue;
+			}
+		} catch {}
+		if (line.includes("\"turn/start\"")) {
+			turns++;
+			continue;
+		}
+		if (!title && line.includes("\"session/title\"")) {
+			try {
+				title = String(JSON.parse(line)?.data?.title ?? "");
+			} catch {}
+			continue;
+		}
+		if (!firstUserText && line.includes("\"user/message\"")) {
+			try {
+				const t = (JSON.parse(line)?.data?.content ?? []).filter((b) => typeof b?.text === "string").map((b) => b.text).join(" ").trim();
+				if (t && !isInjectedTemplate(t)) firstUserText = t.replace(/\s+/g, " ").slice(0, 80);
+			} catch {}
+			continue;
+		}
+	}
+	if (!header) throw new BridgeError("FILE_CORRUPTED", void 0, { file: filePath });
+	return {
+		header,
+		title,
+		turns,
+		firstUserText,
+		warnings
+	};
+}
+/**
 * 写入 DSH v4 会话：header 一帧，每个事件一帧。
 * ★ 强制 seq 稠密（P0 实测：非稠密会被 "is not dense" 拒绝）。
 */
@@ -1492,38 +2392,45 @@ var DshAdapter = class {
 		};
 		return { available: true };
 	}
+	/**
+	* 会话概要缓存（速度优化）：key = 文件路径，值 = mtime+size+概要。
+	* 列表页只需要标题/轮数/cwd，用 peekDshSessionFile 轻量读取；
+	* 文件未变（mtime+size 相同）直接复用缓存，重复 list_sessions 近乎零开销。
+	*/
+	listCache = /* @__PURE__ */ new Map();
 	async list() {
 		const rows = await listDshSessions(dshSessionsRoot());
 		const out = [];
-		for (const r of rows) try {
-			const s = readDshSessionFile(r.filePath);
-			let title = "";
-			let turns = 0;
-			let messages = 0;
-			for (const e of s.events) {
-				if (e.type === "session/title") title = String(e.data?.title ?? "");
-				if (e.type === "turn/start") turns++;
-				if (e.type === "user/message" || e.type === "assistant/message") messages++;
+		const liveFiles = /* @__PURE__ */ new Set();
+		for (const r of rows) {
+			liveFiles.add(r.filePath);
+			const cached = this.listCache.get(r.filePath);
+			if (cached && cached.mtime === r.mtime && cached.size === r.sizeBytes) {
+				out.push(cached.summary);
+				continue;
 			}
-			if (!title) {
-				for (const e of s.events) if (e.type === "user/message") {
-					const text = (e.data?.content ?? []).filter((b) => typeof b?.text === "string").map((b) => b.text).join(" ");
-					if (text && !isInjectedTemplate(text)) {
-						title = text.replace(/\s+/g, " ").slice(0, 80);
-						break;
-					}
-				}
+			try {
+				const p = peekDshSessionFile(r.filePath);
+				const summary = {
+					client: "dsh",
+					id: p.header.id,
+					title: p.title || p.firstUserText || (p.turns === 0 ? "(空会话)" : "(无标题)"),
+					cwd: p.header.cwd ?? "",
+					createdAt: p.header.createdAt,
+					updatedAt: r.mtime,
+					turns: p.turns
+				};
+				this.listCache.set(r.filePath, {
+					mtime: r.mtime,
+					size: r.sizeBytes,
+					summary
+				});
+				out.push(summary);
+			} catch {
+				this.listCache.delete(r.filePath);
 			}
-			out.push({
-				client: "dsh",
-				id: s.header.id,
-				title: title || (messages === 0 ? "(空会话)" : "(无标题)"),
-				cwd: s.header.cwd ?? "",
-				createdAt: s.header.createdAt,
-				updatedAt: r.mtime,
-				turns
-			});
-		} catch {}
+		}
+		for (const key of this.listCache.keys()) if (!liveFiles.has(key)) this.listCache.delete(key);
 		return out.sort((a, b) => b.updatedAt - a.updatedAt);
 	}
 	async read(opts) {
@@ -3405,59 +4312,122 @@ function availableAdapters() {
 function capabilityMatrix() {
 	return availableAdapters().map((client) => ADAPTERS[client]?.capability).filter((c) => Boolean(c));
 }
-/** 列出所有可用客户端的会话 */
+/** 列出所有可用客户端的会话（各端并行探测，速度优化） */
 async function listAllSessions(opts = {}) {
 	const targets = opts.clients ?? availableAdapters();
-	const sessions = [];
-	const errors = [];
 	const limit = opts.limitPerClient ?? 50;
-	for (const client of targets) {
+	const results = await Promise.all(targets.map(async (client) => {
 		const adapter = getAdapter(client);
-		if (!adapter) continue;
+		if (!adapter) return {
+			sessions: [],
+			errors: []
+		};
 		const probe = adapter.probe();
-		if (!probe.available) {
-			errors.push({
+		if (!probe.available) return {
+			sessions: [],
+			errors: [{
 				client,
 				message: probe.reason ?? "不可用"
-			});
-			continue;
-		}
+			}]
+		};
 		try {
-			const list = await adapter.list();
-			sessions.push(...list.slice(0, limit));
+			return {
+				sessions: (await adapter.list()).slice(0, limit),
+				errors: []
+			};
 		} catch (e) {
-			errors.push({
-				client,
-				message: String(e?.message ?? e)
-			});
+			return {
+				sessions: [],
+				errors: [{
+					client,
+					message: String(e?.message ?? e)
+				}]
+			};
 		}
-	}
+	}));
+	const sessions = results.flatMap((r) => r.sessions);
+	const errors = results.flatMap((r) => r.errors);
 	return {
 		sessions: sessions.sort((a, b) => b.updatedAt - a.updatedAt),
 		errors
 	};
 }
-/** 读取会话为 UIR */
+const READ_CACHE_TTL_MS = 300 * 1e3;
+const READ_CACHE_MAX = 24;
+const readCache = /* @__PURE__ */ new Map();
+/** 读取会话为 UIR（带 TTL 缓存） */
 async function readSession(client, sessionId) {
 	const adapter = getAdapter(client);
 	if (!adapter) throw new Error(`客户端 ${client} 尚未支持 UIR 读取（当前支持：${availableAdapters().join(", ")}）`);
-	return adapter.read({ sessionId });
+	const key = `${client}\u0000${sessionId}`;
+	const hit = readCache.get(key);
+	if (hit) {
+		if (Date.now() - hit.at < READ_CACHE_TTL_MS) {
+			readCache.delete(key);
+			readCache.set(key, hit);
+			return hit.result;
+		}
+		readCache.delete(key);
+	}
+	const result = await adapter.read({ sessionId });
+	readCache.set(key, {
+		at: Date.now(),
+		result
+	});
+	if (readCache.size > READ_CACHE_MAX) {
+		const oldest = readCache.keys().next().value;
+		if (oldest !== void 0) readCache.delete(oldest);
+	}
+	return result;
 }
-/** 把 UIR 写入指定客户端 */
+/** 把 UIR 写入指定客户端（写回后失效该目标的读取缓存） */
 async function writeSession(client, session, opts = {}) {
 	const adapter = getAdapter(client);
 	if (!adapter) throw new Error(`客户端 ${client} 尚未支持 UIR 写入（当前支持：${availableAdapters().join(", ")}）`);
-	return adapter.write(session, opts);
+	const w = await adapter.write(session, opts);
+	if (w.ok) readCache.delete(`${client}\u0000${w.targetId}`);
+	return w;
 }
 /**
 * 跨端转换：从一端读到 UIR，再写入另一端。
 *
 * 这是 N×N 互通的核心：不需要 N² 个转换器，只要 2N 个适配器。
+*
+* 压缩导入（长度可自定义）：传 budget / model / maxTurns / focus 任一参数时，
+* 不做逐事件完整拷贝，而是先经压缩引擎生成上下文文档（单轮会话）再写入目标端。
+* 适合超大源会话导入小窗口目标端的场景。
 */
 async function transferSession(params) {
 	const read = await readSession(params.from, params.fromId);
-	const write = await writeSession(params.to, read.session, {
-		title: params.title,
+	const compress = params.budget != null || params.model != null || (params.focus?.length ?? 0) > 0 || params.maxTurns != null;
+	let sessionToWrite = read.session;
+	let imported;
+	const warnings = [...read.warnings];
+	if (compress) {
+		const sum = summarizeSession(read.session, {
+			budget: params.budget,
+			model: params.model,
+			fidelity: params.fidelity,
+			focus: params.focus,
+			maxTurns: params.maxTurns
+		});
+		const title = params.title ?? `【导入】${read.session.title}`.slice(0, 200);
+		const note = [
+			`> 🌉 本会话由 dsh-bridge 从 ${params.from} 压缩导入：`,
+			`> 原始 ${sum.stats.originalTokens} → 导入 ${sum.stats.returnedTokens} tokens`,
+			`>（级别 ${sum.stats.level}，保留 ${Math.round(sum.stats.compressionRatio * 100)}%；技术细节见文末技术索引）`
+		].join("\n");
+		sessionToWrite = compressedContextSession(read.session, `${note}\n\n${sum.context}`, title);
+		imported = {
+			originalTokens: sum.stats.originalTokens,
+			importedTokens: sum.stats.returnedTokens,
+			ratio: sum.stats.compressionRatio,
+			level: sum.stats.level
+		};
+		warnings.push(`已压缩导入：原始 ${sum.stats.originalTokens} → ${sum.stats.returnedTokens} tokens（级别 ${sum.stats.level}），完整原文仍在源端 ${params.from}`);
+	}
+	const write = await writeSession(params.to, sessionToWrite, {
+		title: compress ? params.title : void 0,
 		cwd: params.cwd
 	});
 	if (!write.ok) throw new Error(write.error?.message ?? "写入目标端失败");
@@ -3475,7 +4445,37 @@ async function transferSession(params) {
 			location: write.location,
 			records: write.records
 		},
-		warnings: [...read.warnings, ...write.warnings]
+		warnings: [...warnings, ...write.warnings],
+		imported
+	};
+}
+/** 把压缩后的上下文 markdown 包装成单轮 UIR 会话（供压缩导入写盘） */
+function compressedContextSession(src, markdown, title) {
+	const now = Date.now();
+	return {
+		id: `transfer-${now}`,
+		title,
+		cwd: src.cwd,
+		createdAt: now,
+		updatedAt: now,
+		origin: {
+			client: "mcp",
+			originalId: src.id
+		},
+		turns: [{
+			index: 0,
+			startedAt: now,
+			userMessages: [{
+				kind: "text",
+				role: "user",
+				text: markdown,
+				tier: "high"
+			}],
+			steps: [{
+				index: 0,
+				blocks: []
+			}]
+		}]
 	};
 }
 /** 生成转换损失提示（中文） */
@@ -3491,797 +4491,6 @@ function describeLoss(from, to) {
 	if (src.supportsFileChange && !dst.supportsFileChange) losses.push(`${dst.label} 不支持文件变更记录，变更历史将丢失`);
 	for (const f of dst.lossyFields) losses.push(`${dst.label}：${f}`);
 	return [...new Set(losses)];
-}
-/**
-* 启发式估算（零依赖，误差约 ±15%）。
-* 依据：中文约 1 token/字，英文约 4 字符/token，代码约 3 字符/token。
-*/
-function estimateTokensHeuristic(text) {
-	if (!text) return 0;
-	let cjk = 0;
-	let ascii = 0;
-	let other = 0;
-	for (let i = 0; i < text.length; i++) {
-		const c = text.charCodeAt(i);
-		if (c < 128) ascii++;
-		else if (c >= 19968 && c <= 40959 || c >= 12352 && c <= 12543 || c >= 44032 && c <= 55215) cjk++;
-		else other++;
-	}
-	return Math.ceil(cjk * 1 + ascii / 3.8 + other / 1.5);
-}
-/**
-* 估算 token 数。
-* 当前实现使用启发式（零依赖，跨平台稳定）。
-* 预留 tiktoken 接入点：若宿主环境提供精确分词，可通过 setEncoder 注入。
-*/
-function estimateTokens(text) {
-	return estimateTokensHeuristic(text);
-}
-/** 安全余量：预算按 92% 使用（留出客户端包装开销） */
-const BUDGET_SAFETY_RATIO = .92;
-/** 默认预算（未指定模型/预算时） */
-const DEFAULT_BUDGET = 2e5;
-/** 硬上限：允许的最大预算（2M，覆盖 Gemini 1.5 Pro 等） */
-const MAX_BUDGET = 2e6;
-/**
-* 模型上下文长度预设表。
-*
-* 键为小写匹配片段（按顺序匹配，先具体后通用）。
-* 数值为**模型总上下文窗口**（不是可用输出），预算会再乘安全系数。
-*/
-const MODEL_CONTEXT_PRESETS = [
-	{
-		match: "claude-opus-4",
-		context: 2e5,
-		label: "Claude Opus 4"
-	},
-	{
-		match: "claude-sonnet-4",
-		context: 2e5,
-		label: "Claude Sonnet 4"
-	},
-	{
-		match: "claude-3-7",
-		context: 2e5,
-		label: "Claude 3.7"
-	},
-	{
-		match: "claude-3-5",
-		context: 2e5,
-		label: "Claude 3.5"
-	},
-	{
-		match: "claude",
-		context: 2e5,
-		label: "Claude"
-	},
-	{
-		match: "gpt-5",
-		context: 4e5,
-		label: "GPT-5"
-	},
-	{
-		match: "gpt-4.1",
-		context: 1e6,
-		label: "GPT-4.1"
-	},
-	{
-		match: "gpt-4o",
-		context: 128e3,
-		label: "GPT-4o"
-	},
-	{
-		match: "gpt-4-turbo",
-		context: 128e3,
-		label: "GPT-4 Turbo"
-	},
-	{
-		match: "gpt-4",
-		context: 128e3,
-		label: "GPT-4"
-	},
-	{
-		match: "o1",
-		context: 2e5,
-		label: "o1"
-	},
-	{
-		match: "o3",
-		context: 2e5,
-		label: "o3"
-	},
-	{
-		match: "gemini-2",
-		context: 1e6,
-		label: "Gemini 2"
-	},
-	{
-		match: "gemini-1.5-pro",
-		context: 2e6,
-		label: "Gemini 1.5 Pro"
-	},
-	{
-		match: "gemini",
-		context: 1e6,
-		label: "Gemini"
-	},
-	{
-		match: "deepseek-v4",
-		context: 256e3,
-		label: "DeepSeek V4"
-	},
-	{
-		match: "deepseek-v3",
-		context: 128e3,
-		label: "DeepSeek V3"
-	},
-	{
-		match: "deepseek",
-		context: 128e3,
-		label: "DeepSeek"
-	},
-	{
-		match: "glm-5",
-		context: 2e5,
-		label: "GLM-5"
-	},
-	{
-		match: "glm-4.6",
-		context: 2e5,
-		label: "GLM-4.6"
-	},
-	{
-		match: "glm-4",
-		context: 128e3,
-		label: "GLM-4"
-	},
-	{
-		match: "glm",
-		context: 128e3,
-		label: "GLM"
-	},
-	{
-		match: "kimi-k2",
-		context: 256e3,
-		label: "Kimi K2"
-	},
-	{
-		match: "kimi",
-		context: 128e3,
-		label: "Kimi"
-	},
-	{
-		match: "qwen",
-		context: 128e3,
-		label: "Qwen"
-	},
-	{
-		match: "minimax",
-		context: 2e5,
-		label: "MiniMax"
-	},
-	{
-		match: "doubao",
-		context: 128e3,
-		label: "豆包"
-	},
-	{
-		match: "hunyuan",
-		context: 128e3,
-		label: "混元"
-	},
-	{
-		match: "yi-",
-		context: 2e5,
-		label: "Yi"
-	},
-	{
-		match: "llama",
-		context: 128e3,
-		label: "Llama"
-	},
-	{
-		match: "mistral",
-		context: 128e3,
-		label: "Mistral"
-	}
-];
-/** 按模型名查上下文长度（未匹配返回 undefined） */
-function contextForModel(model) {
-	if (!model) return void 0;
-	const m = model.toLowerCase();
-	for (const p of MODEL_CONTEXT_PRESETS) if (m.includes(p.match)) return {
-		context: p.context,
-		label: p.label
-	};
-}
-/**
-* 解析预算。
-*
-* 优先级：显式 budget > 模型预设 > 默认 200k
-* 上限：MAX_BUDGET
-*/
-function resolveBudget(opts = {}) {
-	let requested;
-	let source;
-	let modelPreset;
-	if (opts.budget != null && Number.isFinite(opts.budget) && opts.budget > 0) {
-		requested = Math.floor(opts.budget);
-		source = "explicit";
-	} else {
-		const preset = contextForModel(opts.model);
-		if (preset) {
-			requested = preset.context;
-			modelPreset = preset;
-			source = "model";
-		} else {
-			requested = DEFAULT_BUDGET;
-			source = "default";
-		}
-	}
-	let clamped = false;
-	if (requested > 2e6) {
-		requested = MAX_BUDGET;
-		clamped = true;
-		source = "clamped";
-	}
-	if (requested < 1) requested = 1;
-	return {
-		requested,
-		effective: Math.floor(requested * BUDGET_SAFETY_RATIO),
-		source,
-		modelPreset,
-		clamped
-	};
-}
-//#endregion
-//#region src/budget/summarize.ts
-const FENCE_RE = /```[\w+-]*\n[\s\S]*?```/g;
-const INLINE_CODE_RE = /`[^`\n]{1,200}`/g;
-/**
-* 文件路径正则（保留给 extractProtected 使用；单行内联匹配）。
-*/
-const PATH_RE = /(?:[A-Za-z]:[\\/]|\\\\|\/)[^\s"'<>|*?`，。；：、）】]+/g;
-/**
-* 报错信息正则。
-* 不要求行首（实测报错常出现在行中间），并覆盖常见形态：
-*   Error: / Exception: / FATAL / panic / Traceback / XXX failed / error C1234
-*/
-const ERROR_RE = /(?:\b(?:Error|ERROR|Exception|FATAL|FAILED|panic|Traceback)\b[:：]?\s*[^\n]{0,200}|\berror\s+[A-Z]{1,4}\d{3,5}[^\n]{0,150}|\b[A-Za-z_][\w.]*\s+failed\b[^\n]{0,150})/g;
-const VERSION_RE = /\bv?\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?\b/g;
-const CMD_RE = /(?:pwsh|powershell|bash|sh|cmd|node|npm|pnpm|git|python|npx)\s+(?:-[A-Za-z]+\s+)*[^\n]{3,300}/g;
-/** 提取必须逐字保留的技术片段 */
-function extractProtected(text) {
-	const out = [];
-	const push = (kind, arr) => {
-		if (!arr) return;
-		for (const m of arr) out.push({
-			kind,
-			text: m
-		});
-	};
-	push("code", text.match(FENCE_RE));
-	push("inline-code", text.match(INLINE_CODE_RE));
-	push("path", text.match(PATH_RE));
-	push("error", text.match(ERROR_RE));
-	push("version", text.match(VERSION_RE));
-	const seen = /* @__PURE__ */ new Set();
-	return out.filter((p) => {
-		const k = p.kind + "\0" + p.text;
-		if (seen.has(k)) return false;
-		seen.add(k);
-		return true;
-	});
-}
-/**
-* 把 UIR 会话压缩成不超过预算的上下文文本。
-*
-* 预算来源优先级：opts.budget > opts.model 预设 > 默认 200k
-*/
-function summarizeSession(session, opts = {}) {
-	const budgetInfo = resolveBudget({
-		budget: opts.budget,
-		model: opts.model
-	});
-	const budget = budgetInfo.effective;
-	const fidelity = opts.fidelity ?? "balanced";
-	const stats = {
-		originalTokens: 0,
-		returnedTokens: 0,
-		compressionRatio: 1,
-		level: "L0",
-		dropped: {
-			narrative: 0,
-			duplicates: 0,
-			injected: 0,
-			reasoning: 0
-		},
-		preserved: {
-			codeBlocks: 0,
-			commands: 0,
-			paths: 0,
-			errors: 0,
-			toolCalls: 0
-		},
-		summarized: false
-	};
-	const originalText = renderFull(session);
-	stats.originalTokens = estimateTokens(originalText);
-	collectPreservedStats(session, stats);
-	if (session.turns.length === 0) {
-		stats.returnedTokens = stats.originalTokens;
-		stats.level = "L3";
-		return {
-			context: originalText + "\n\n（无对话内容）",
-			outline: [],
-			stats,
-			budget: budgetInfo
-		};
-	}
-	if (stats.originalTokens <= budget || fidelity === "full" && stats.originalTokens <= budget * 1.05) {
-		stats.returnedTokens = stats.originalTokens;
-		stats.level = "L0";
-		return {
-			context: originalText,
-			outline: buildOutline(session),
-			stats,
-			budget: budgetInfo
-		};
-	}
-	const l1 = applyL1(session, stats);
-	const l1Text = renderFull(l1);
-	const l1Tokens = estimateTokens(l1Text);
-	if (l1Tokens <= budget) {
-		stats.returnedTokens = l1Tokens;
-		stats.level = "L1";
-		stats.summarized = true;
-		finishRatio(stats);
-		return {
-			context: l1Text,
-			outline: buildOutline(l1),
-			stats,
-			budget: budgetInfo
-		};
-	}
-	const { context, level } = applyL2L3(l1, budget, fidelity, opts.focus ?? [], stats);
-	stats.returnedTokens = estimateTokens(context);
-	stats.level = level;
-	stats.summarized = true;
-	finishRatio(stats);
-	return {
-		context,
-		outline: buildOutline(session),
-		stats,
-		budget: budgetInfo
-	};
-}
-function finishRatio(stats) {
-	stats.compressionRatio = stats.originalTokens > 0 ? Math.round(stats.returnedTokens / stats.originalTokens * 1e3) / 1e3 : 1;
-}
-/** 剥离注入模板 + 相邻重复去重 */
-function applyL1(session, stats) {
-	const out = {
-		...session,
-		turns: []
-	};
-	const seenTexts = /* @__PURE__ */ new Set();
-	for (const turn of session.turns) {
-		const newTurn = {
-			...turn,
-			userMessages: [],
-			steps: []
-		};
-		for (const b of turn.userMessages) {
-			if (b.kind === "text") {
-				if (isInjectedTemplate(b.text)) {
-					stats.dropped.injected += b.text.length;
-					continue;
-				}
-				const key = b.text.trim();
-				if (key.length > 40 && seenTexts.has(key)) {
-					stats.dropped.duplicates += b.text.length;
-					continue;
-				}
-				if (key.length > 40) seenTexts.add(key);
-			}
-			newTurn.userMessages.push(b);
-		}
-		for (const step of turn.steps) {
-			const newStep = {
-				...step,
-				blocks: []
-			};
-			for (const b of step.blocks) {
-				if (b.kind === "text" && isInjectedTemplate(b.text)) {
-					stats.dropped.injected += b.text.length;
-					continue;
-				}
-				newStep.blocks.push(b);
-			}
-			newTurn.steps.push(newStep);
-		}
-		out.turns.push(newTurn);
-	}
-	return out;
-}
-function applyL2L3(session, budget, fidelity, focus, stats) {
-	const turns = session.turns;
-	const n = turns.length;
-	if (n === 0) return {
-		context: renderHeader(session, stats) + "\n\n（无对话内容）",
-		level: "L3"
-	};
-	const headerText = renderHeader(session, stats);
-	const techIndexReserve = Math.min(Math.floor(budget * .18), 3e4);
-	let remaining = budget - estimateTokens(headerText) - techIndexReserve - 200;
-	const costs = turns.map((t) => ({
-		turn: t,
-		fullTokens: estimateTokens(renderTurnFull(t)),
-		l2Tokens: estimateTokens(renderTurnL2(t, focus, {
-			...stats,
-			dropped: { ...stats.dropped },
-			preserved: { ...stats.preserved }
-		})),
-		plan: "L3"
-	}));
-	const recentStart = Math.max(0, n - 3);
-	for (let i = n - 1; i >= recentStart; i--) if (costs[i].fullTokens <= remaining) {
-		costs[i].plan = "L0";
-		remaining -= costs[i].fullTokens;
-	}
-	for (let i = recentStart - 1; i >= 0; i--) {
-		if (costs[i].plan !== "L3") continue;
-		if (costs[i].l2Tokens <= remaining) {
-			costs[i].plan = "L2";
-			remaining -= costs[i].l2Tokens;
-		}
-	}
-	let upgraded = true;
-	while (upgraded && remaining > 500) {
-		upgraded = false;
-		for (let i = n - 1; i >= 0; i--) {
-			if (costs[i].plan !== "L2") continue;
-			const delta = costs[i].fullTokens - costs[i].l2Tokens;
-			if (delta <= remaining) {
-				costs[i].plan = "L0";
-				remaining -= delta;
-				upgraded = true;
-				break;
-			}
-		}
-		if (upgraded) continue;
-		for (let i = n - 1; i >= 0; i--) {
-			if (costs[i].plan !== "L3") continue;
-			if (costs[i].l2Tokens <= remaining) {
-				costs[i].plan = "L2";
-				remaining -= costs[i].l2Tokens;
-				upgraded = true;
-				break;
-			}
-		}
-	}
-	const parts = [headerText];
-	const earlyTurns = costs.filter((c) => c.plan === "L3");
-	if (earlyTurns.length > 0) parts.push(renderEarlySummary(earlyTurns.map((c) => c.turn)));
-	for (const c of costs) {
-		if (c.plan === "L3") continue;
-		if (c.plan === "L0") parts.push(renderTurnFull(c.turn));
-		else parts.push(renderTurnL2(c.turn, focus, stats));
-	}
-	const techIndex = buildTechIndex(session, Math.max(techIndexReserve, remaining));
-	if (techIndex.text) {
-		parts.push(techIndex.text);
-		stats.preserved.techIndexEntries = techIndex.count;
-	}
-	return {
-		context: parts.join("\n\n"),
-		level: "L2"
-	};
-}
-/**
-* 构建「技术索引」——全文去重后的关键片段清单。
-*
-* 为什么需要：轮次级折叠（L3）会丢掉早期轮次的文本，
-* 但其中的路径/命令/报错/版本号是用户明确要求「不能丢」的技术细节。
-* 把它们去重后集中列出，用极小空间保住关键信息。
-*/
-function buildTechIndex(session, remainingTokens) {
-	if (remainingTokens < 300) return {
-		text: "",
-		count: 0
-	};
-	const paths = /* @__PURE__ */ new Set();
-	const commands = /* @__PURE__ */ new Set();
-	const errors = /* @__PURE__ */ new Set();
-	const versions = /* @__PURE__ */ new Set();
-	const collect = (text) => {
-		if (!text) return;
-		for (const p of text.match(PATH_RE) ?? []) {
-			const t = p.trim();
-			if (t.length >= 8 && t.length <= 300) paths.add(t);
-		}
-		for (const c of text.match(CMD_RE) ?? []) {
-			const t = c.trim();
-			if (t.length >= 6 && t.length <= 300) commands.add(t);
-		}
-		for (const e of text.match(ERROR_RE) ?? []) {
-			const t = e.trim();
-			if (t.length >= 10 && t.length <= 400) errors.add(t);
-		}
-		for (const v of text.match(VERSION_RE) ?? []) if (/^\d+\.\d+/.test(v)) versions.add(v);
-	};
-	for (const turn of session.turns) {
-		for (const b of turn.userMessages) if (b.kind === "text") collect(b.text);
-		for (const step of turn.steps) {
-			if (step.reasoning) collect(step.reasoning);
-			for (const b of step.blocks) if (b.kind === "text") collect(b.text);
-			else if (b.kind === "tool-call") collect(b.rawArgs ?? JSON.stringify(b.args ?? {}));
-			else if (b.kind === "tool-result") collect(b.output.text);
-			else if (b.kind === "file-change") {
-				paths.add(b.path);
-				if (b.diff) collect(b.diff);
-			}
-		}
-	}
-	const sections = [];
-	let count = 0;
-	const budgetChars = Math.floor(remainingTokens * 3.5);
-	let used = 0;
-	const addSection = (title, items, maxItems) => {
-		if (items.length === 0) return;
-		const picked = [];
-		for (const it of items.slice(0, maxItems)) {
-			if (used + it.length + 4 > budgetChars - 40) break;
-			picked.push(it);
-			used += it.length + 4;
-		}
-		if (picked.length === 0) return;
-		sections.push(`### ${title}（${picked.length}${picked.length < items.length ? ` / 共 ${items.length}` : ""}）\n` + picked.map((x) => `- \`${x}\``).join("\n"));
-		count += picked.length;
-	};
-	const fileNames = /* @__PURE__ */ new Set();
-	const dirPaths = /* @__PURE__ */ new Set();
-	for (const p of paths) {
-		const segs = p.split(/[\\/]+/).filter(Boolean);
-		if (segs.length === 0) continue;
-		const base = segs[segs.length - 1];
-		if (base && base.includes(".") && base.length <= 80) fileNames.add(base);
-		if (segs.length >= 3) {
-			const dir = segs.slice(0, -1).join("\\");
-			if (dir.length >= 8 && dir.length <= 200) dirPaths.add(dir);
-		}
-	}
-	addSection("报错信息", [...errors], 300);
-	addSection("执行过的命令", [...commands], 500);
-	addSection("涉及的文件", [...fileNames].sort((a, b) => a.localeCompare(b)), 3e3);
-	addSection("关键目录", [...dirPaths].sort((a, b) => a.length - b.length), 2e3);
-	addSection("版本号", [...versions].sort(), 500);
-	if (sections.length === 0) return {
-		text: "",
-		count: 0
-	};
-	return {
-		text: `\n## 技术索引（全文去重保留）\n\n${sections.join("\n\n")}`,
-		count
-	};
-}
-function renderHeader(session, stats) {
-	const d = new Date(session.createdAt);
-	const dateStr = Number.isFinite(d.getTime()) ? d.toISOString().slice(0, 16).replace("T", " ") : "未知时间";
-	return [
-		`# 会话上下文：${session.title || "(无标题)"}`,
-		`> 来源 ${session.origin.client} · ${dateStr} · 工作目录 ${session.cwd || "(未知)"}`,
-		`> 原始约 ${stats.originalTokens} tokens（压缩后见文末统计）`
-	].join("\n");
-}
-/** L0：完整渲染 */
-function renderFull(session) {
-	const parts = [`# 会话上下文：${session.title || "(无标题)"}`];
-	parts.push(`> 来源 ${session.origin.client} · 工作目录 ${session.cwd || "(未知)"}`);
-	for (const turn of session.turns) parts.push(renderTurnFull(turn));
-	return parts.join("\n\n");
-}
-function renderTurnFull(turn) {
-	const lines = [`## 第 ${turn.index + 1} 轮`];
-	for (const b of turn.userMessages) if (b.kind === "text") lines.push(`**用户**：${demoteHeadings(b.text)}`);
-	for (const step of turn.steps) for (const b of step.blocks) lines.push(renderBlockFull(b));
-	return lines.filter(Boolean).join("\n");
-}
-function renderBlockFull(b) {
-	switch (b.kind) {
-		case "text": return b.role === "assistant" ? `**助手**：${demoteHeadings(b.text)}` : `**${b.role}**：${demoteHeadings(b.text)}`;
-		case "reasoning": return b.encrypted ? `> [加密思考 · 无法解码 · ${b.encryptedBytes ?? 0} 字节]` : `> 💭 ${b.text}`;
-		case "tool-call": return `- 🔧 \`${b.name}\`(${b.rawArgs ?? JSON.stringify(b.args ?? {})})`;
-		case "tool-result": return `- ${b.isError ? "⚠️" : "✅"} 结果：${b.output.text}`;
-		case "file-change": return `- 📝 ${b.operation} \`${b.path}\`${b.diff ? "\n```diff\n" + b.diff + "\n```" : ""}`;
-		case "image": return `- 🖼 图片 (${b.mime})`;
-		case "compaction": return `- 🗜 上下文压缩：${b.summary}`;
-		default: return "";
-	}
-}
-/**
-* L2：结构化渲染 —— 保留 P0 片段，压缩叙述。
-*/
-function renderTurnL2(turn, focus, stats) {
-	const lines = [`## 第 ${turn.index + 1} 轮（摘要）`];
-	for (const b of turn.userMessages) if (b.kind === "text") lines.push(`**用户**：${demoteHeadings(truncate(b.text, 1500))}`);
-	for (const step of turn.steps) {
-		if (step.reasoning) {
-			const conclusion = extractConclusion(step.reasoning);
-			if (conclusion) {
-				stats.dropped.reasoning += Math.max(0, step.reasoning.length - conclusion.length);
-				lines.push(`> 💭 ${conclusion}`);
-			}
-		}
-		for (const b of step.blocks) switch (b.kind) {
-			case "text": {
-				if (b.role !== "assistant") break;
-				const compressed = compressText(b.text, focus, stats);
-				if (compressed) lines.push(`**助手**：${demoteHeadings(compressed)}`);
-				break;
-			}
-			case "reasoning": {
-				if (b.encrypted) break;
-				const conclusion = extractConclusion(b.text);
-				if (conclusion) {
-					stats.dropped.reasoning += Math.max(0, b.text.length - conclusion.length);
-					lines.push(`> 💭 ${conclusion}`);
-				}
-				break;
-			}
-			case "tool-call":
-				lines.push(`- 🔧 \`${b.name}\` ${truncate(b.rawArgs ?? JSON.stringify(b.args ?? {}), 800)}`);
-				break;
-			case "tool-result": {
-				const out = b.output.text;
-				const preserved = truncatePreservingTech(out, 4e3, stats);
-				lines.push(`  ${b.isError ? "⚠️ 错误" : "✅"}：${preserved}`);
-				break;
-			}
-			case "file-change":
-				lines.push(`- 📝 ${b.operation} \`${b.path}\``);
-				break;
-			case "image":
-				lines.push(`- 🖼 图片 (${b.mime})`);
-				break;
-			default: break;
-		}
-	}
-	return lines.join("\n");
-}
-/** L3：早期轮次折叠 */
-function renderEarlySummary(turns) {
-	if (turns.length === 0) return "";
-	const first = turns[0].index + 1;
-	const last = turns[turns.length - 1].index + 1;
-	const intents = [];
-	const files = /* @__PURE__ */ new Set();
-	const tools = /* @__PURE__ */ new Set();
-	for (const t of turns) {
-		for (const b of t.userMessages) if (b.kind === "text") {
-			const s = b.text.replace(/\s+/g, " ").trim().slice(0, 60);
-			if (s) intents.push(s);
-		}
-		for (const step of t.steps) for (const b of step.blocks) {
-			if (b.kind === "tool-call") tools.add(b.name);
-			if (b.kind === "file-change") files.add(b.path);
-		}
-	}
-	const lines = [`## 概览（第 ${first}–${last} 轮，已折叠）`, intents.length > 0 ? `- 用户诉求：${[...new Set(intents)].slice(0, 8).map((s) => `「${s}」`).join("、")}` : "- （无明确诉求记录）"];
-	if (files.size > 0) lines.push(`- 涉及文件：${[...files].slice(0, 15).map((f) => `\`${f}\``).join("、")}${files.size > 15 ? ` 等 ${files.size} 个` : ""}`);
-	if (tools.size > 0) lines.push(`- 使用工具：${[...tools].join("、")}`);
-	return lines.join("\n");
-}
-/** 压缩叙述性文本：保留 P0 片段 + 首尾句 */
-function compressText(text, focus, stats) {
-	const f = analyzeText(text);
-	if (text.length <= 400) return text;
-	const techScore = f.codeBlocks * 10 + f.paths * 3 + f.errors * 8 + f.commands * 5;
-	const keepChars = techScore > 10 ? 2e3 : techScore > 3 ? 1200 : 600;
-	if (text.length <= keepChars) return text;
-	const protectedPieces = extractProtected(text);
-	const head = text.slice(0, Math.floor(keepChars * .6));
-	const tail = text.slice(-Math.floor(keepChars * .25));
-	const focusHits = [];
-	for (const kw of focus) {
-		const idx = text.indexOf(kw);
-		if (idx >= 0) focusHits.push(text.slice(Math.max(0, idx - 100), Math.min(text.length, idx + 300)));
-	}
-	const droppedChars = text.length - (head.length + tail.length);
-	stats.dropped.narrative += Math.max(0, droppedChars);
-	const pieces = [head.trim()];
-	if (focusHits.length > 0) pieces.push(`[关注点片段]\n${focusHits.join("\n…\n")}`);
-	const missing = protectedPieces.filter((p) => !head.includes(p.text) && !tail.includes(p.text));
-	if (missing.length > 0) pieces.push(`[关键细节]\n${missing.slice(0, 20).map((p) => p.text).join("\n")}`);
-	pieces.push("…（此处省略部分叙述）…");
-	pieces.push(tail.trim());
-	return pieces.join("\n");
-}
-/** 截断但保留技术细节 */
-function truncatePreservingTech(text, max, stats) {
-	if (text.length <= max) return text;
-	const head = text.slice(0, Math.floor(max * .7));
-	const tail = text.slice(-Math.floor(max * .25));
-	const missing = extractProtected(text).filter((p) => !head.includes(p.text) && !tail.includes(p.text));
-	stats.dropped.narrative += Math.max(0, text.length - head.length - tail.length);
-	let out = `${head.trim()}\n…（省略 ${text.length - head.length - tail.length} 字符）…\n${tail.trim()}`;
-	if (missing.length > 0) out += `\n[关键细节]\n${missing.slice(0, 15).map((p) => p.text).join("\n")}`;
-	return out;
-}
-/** 提取思考的结论句（最后一段判断性语句） */
-function extractConclusion(reasoning) {
-	if (!reasoning) return "";
-	if (reasoning.length <= 300) return reasoning.trim();
-	const lastParas = reasoning.split(/\n{2,}/).filter((p) => p.trim()).slice(-2).join("\n");
-	const conclusion = lastParas.split(/(?<=[。.!?！？])\s+/).filter((s) => s.trim()).slice(-3).join(" ").trim();
-	return conclusion.length > 20 ? conclusion.slice(0, 800) : lastParas.slice(0, 500).trim();
-}
-function truncate(s, max) {
-	if (!s) return "";
-	if (s.length <= max) return s;
-	return s.slice(0, max) + `…（省略 ${s.length - max} 字符）`;
-}
-/**
-* 降级原文里的 Markdown 标题，避免和本引擎的 `## 第 N 轮` 结构混淆。
-* 做法：把行首的 `#` 替换为 `▪`（保留视觉层级感，但不被解析为标题）。
-*/
-function demoteHeadings(text) {
-	if (!text) return text;
-	return text.replace(/^(\s{0,3})(#{1,6})(\s+)/gm, (_m, indent, hashes, space) => `${indent}${"▪".repeat(hashes.length)}${space}`);
-}
-function collectPreservedStats(session, stats) {
-	for (const turn of session.turns) {
-		for (const b of turn.userMessages) if (b.kind === "text") {
-			const f = analyzeText(b.text);
-			stats.preserved.paths += f.paths;
-			stats.preserved.errors += f.errors;
-			stats.preserved.codeBlocks += f.codeBlocks;
-			stats.preserved.commands += f.commands;
-		}
-		for (const step of turn.steps) for (const b of step.blocks) {
-			if (b.kind === "tool-call") stats.preserved.toolCalls++;
-			if (b.kind === "text") {
-				const f = analyzeText(b.text);
-				stats.preserved.paths += f.paths;
-				stats.preserved.errors += f.errors;
-				stats.preserved.codeBlocks += f.codeBlocks;
-				stats.preserved.commands += f.commands;
-			}
-			if (b.kind === "tool-result") {
-				const f = analyzeText(b.output.text);
-				stats.preserved.paths += f.paths;
-				stats.preserved.errors += f.errors;
-			}
-		}
-	}
-}
-function buildOutline(session) {
-	return session.turns.map((t) => {
-		let intent = "";
-		const files = /* @__PURE__ */ new Set();
-		const tools = /* @__PURE__ */ new Set();
-		for (const b of t.userMessages) if (b.kind === "text" && !intent) intent = b.text.replace(/\s+/g, " ").trim().slice(0, 100);
-		for (const step of t.steps) for (const b of step.blocks) {
-			if (b.kind === "tool-call") tools.add(b.name);
-			if (b.kind === "file-change") files.add(b.path);
-		}
-		return {
-			turn: t.index + 1,
-			intent,
-			files: [...files],
-			tools: [...tools]
-		};
-	});
-}
-/** 生成统计摘要（人类可读） */
-function formatStats(stats) {
-	const pct = (n) => `${Math.round(n * 100)}%`;
-	return [
-		`原始 ${stats.originalTokens} tokens → 返回 ${stats.returnedTokens} tokens（保留 ${pct(stats.compressionRatio)}）`,
-		`压缩级别 ${stats.level}${stats.summarized ? "（已摘要）" : "（未摘要）"}`,
-		`保留：代码块 ${stats.preserved.codeBlocks} · 命令 ${stats.preserved.commands} · 路径 ${stats.preserved.paths} · 报错 ${stats.preserved.errors} · 工具调用 ${stats.preserved.toolCalls}`,
-		`丢弃：注入模板 ${stats.dropped.injected} 字符 · 重复 ${stats.dropped.duplicates} 字符 · 叙述 ${stats.dropped.narrative} 字符 · 思考 ${stats.dropped.reasoning} 字符`
-	].join("\n");
 }
 //#endregion
 //#region src/mcp/tools.ts
@@ -4302,6 +4511,20 @@ function assertClient(v, field) {
 	const valid = availableAdapters();
 	if (!valid.includes(s)) throw new Error(`${field} 必须是以下之一：${valid.join(", ")}（收到：${s || "空"}）`);
 	return s;
+}
+/** 校验并解析预算参数（数字或 '92k' / '1.2万' 字符串），非法时抛中文错误 */
+function assertBudget(v) {
+	if (v == null) return void 0;
+	const n = parseBudgetValue(v);
+	if (n == null) throw new Error(`budget 无法解析：${String(v)}（支持 92000 / 92k / 1.5m / 1.2万）`);
+	return n;
+}
+/** 校验 maxTurns 参数（≥1 的整数），非法时抛中文错误 */
+function assertMaxTurns(v) {
+	if (v == null) return void 0;
+	const n = Number(v);
+	if (!Number.isFinite(n) || n < 1) throw new Error(`maxTurns 必须是 ≥ 1 的数字（收到：${String(v)}）`);
+	return Math.floor(n);
 }
 /** 把纯文本消息数组转成 UIR 会话（供 push_context 使用） */
 function messagesToUir(params) {
@@ -4389,25 +4612,32 @@ function registerTools(server) {
 	});
 	server.tool({
 		name: "list_sessions",
-		description: "列出各客户端的会话。可按客户端、工作目录、关键字过滤。",
+		description: "【用途】列出本机各客户端的历史会话，返回 Markdown 表格。\n【典型场景】用户说「看看我有哪些会话」「找找那个关于 XX 的会话」时调用。\n【下一步】拿到表格里的「会话 ID」后，可传给 get_context（读上下文）或 transfer_session（转换到别的端）。\n【注意】表格里的「会话 ID」是长字符串，不是标题；传给其他工具时必须用 ID 而不是标题。",
 		inputSchema: {
 			type: "object",
 			properties: {
 				client: {
 					type: "string",
-					description: "限定客户端（dsh/codex/zcode/claude-code/workbuddy），不传则全部"
+					enum: [
+						"dsh",
+						"codex",
+						"zcode",
+						"claude-code",
+						"workbuddy"
+					],
+					description: "只列某个客户端（可选）。不传则列全部五端。"
 				},
 				query: {
 					type: "string",
-					description: "标题或路径关键字"
+					description: "关键字过滤（匹配标题或工作目录，不区分大小写）"
 				},
 				cwd: {
 					type: "string",
-					description: "按工作目录过滤（包含匹配）"
+					description: "按工作目录过滤（包含匹配），如 \"FPS_Extraction\""
 				},
 				limit: {
 					type: "number",
-					description: "每端返回上限，默认 20"
+					description: "每个客户端最多返回多少条，默认 20，上限 100"
 				}
 			}
 		}
@@ -4443,25 +4673,37 @@ function registerTools(server) {
 	});
 	server.tool({
 		name: "get_context",
-		description: "获取指定会话的上下文，自动压缩到 token 预算内。预算可由 `model`（按模型上下文窗口自动定）或 `budget`（显式 token 数）指定，默认 200k。技术细节（代码块、命令、路径、报错、参数）优先保留，超出预算时早期轮次折叠为摘要。",
+		description: "【用途】把某个客户端的历史会话读成一段可直接用于对话的 Markdown 上下文。典型场景：用户说「把我在 DSH/Codex 里那个会话的上下文拉进来」，你就调这个工具。\n【调用前】先用 list_sessions 拿到 client 和 sessionId（sessionId 是会话 ID，不是标题）。\n【长度自定义】两个维度：①token 预算——budget（数字或 92k/1.2万 字符串）或 model（按模型窗口自动定）；②轮数——maxTurns（只导入最近 N 轮，更早的折叠为概览）。可组合。\n【预算优先级】budget > model > 默认 200k。\n【保留策略】技术细节（代码块、命令、文件路径、报错、参数、版本号）逐字保留；叙述性内容压缩；超出预算时早期轮次折叠为摘要，并在末尾附「技术索引」列出全部文件名/命令/报错。\n【返回】Markdown 文本，开头有 HTML 注释标明来源、预算、压缩统计。",
 		inputSchema: {
 			type: "object",
 			properties: {
 				client: {
 					type: "string",
-					description: "客户端类型（必填）"
+					enum: [
+						"dsh",
+						"codex",
+						"zcode",
+						"claude-code",
+						"workbuddy"
+					],
+					description: "会话所在的客户端。可选值见 enum；不确定有哪些可先调 list_clients。"
 				},
 				sessionId: {
 					type: "string",
-					description: "会话 ID（必填）"
+					description: "会话 ID（必填）。从 list_sessions 返回的表格里取「会话 ID」那一列，是长字符串（如 session-xxx 或 UUID），不是标题。"
 				},
 				model: {
 					type: "string",
-					description: "模型名（可选）。按模型上下文窗口自动定预算，如 claude-sonnet-4-5→200k、gpt-4.1→1M、gemini-1.5-pro→2M、deepseek-v4→256k、glm-5→200k。与 budget 同时传时 budget 优先。"
+					description: "模型名（推荐）。按该模型的上下文窗口自动定预算，如 claude-sonnet-4-5→200k、gpt-4.1→920k、gemini-1.5-pro→1.84M、deepseek-v4→235k、glm-5→184k。完整列表调 list_models。与 budget 同时传时 budget 优先。"
 				},
 				budget: {
+					anyOf: [{ type: "number" }, { type: "string" }],
+					description: "显式 token 预算（可选，优先级最高）。支持数字 32000 或字符串 92k / 1.5m / 1.2万，上限 2,000,000。实际可用 = 该值 × 0.92（安全余量）。"
+				},
+				maxTurns: {
 					type: "number",
-					description: "显式 token 预算（可选，优先级最高，上限 2M）"
+					minimum: 1,
+					description: "只导入最近 N 轮（可选）。更早的轮次折叠为概览，其技术细节仍保留在文末技术索引。与 budget 组合可精确控制导入长度。"
 				},
 				fidelity: {
 					type: "string",
@@ -4470,12 +4712,12 @@ function registerTools(server) {
 						"balanced",
 						"compact"
 					],
-					description: "保真度，默认 balanced"
+					description: "压缩力度。full=尽量不压（可能超预算）、balanced=默认平衡、compact=更激进压缩。默认 balanced。"
 				},
 				focus: {
 					type: "array",
 					items: { type: "string" },
-					description: "关注点关键字（提升匹配内容保留优先级）"
+					description: "关注点关键字（可选）。命中这些词的内容会提升保留优先级，如 [\"报错\", \"API 参数\", \"数据库迁移\"]。"
 				}
 			},
 			required: ["client", "sessionId"]
@@ -4484,23 +4726,26 @@ function registerTools(server) {
 		const client = assertClient(args.client, "client");
 		const sessionId = String(args.sessionId ?? "");
 		if (!sessionId) throw new Error("sessionId 不能为空");
+		const budgetArg = assertBudget(args.budget);
+		const maxTurns = assertMaxTurns(args.maxTurns);
 		const model = args.model ? String(args.model) : void 0;
-		const budgetArg = args.budget != null ? Number(args.budget) : void 0;
-		const budgetInfo = resolveBudget({
-			budget: budgetArg,
-			model
-		});
 		const read = await readSession(client, sessionId);
 		const sum = summarizeSession(read.session, {
 			budget: budgetArg,
 			model,
 			fidelity: args.fidelity,
-			focus: Array.isArray(args.focus) ? args.focus.map(String) : void 0
+			focus: Array.isArray(args.focus) ? args.focus.map(String) : void 0,
+			maxTurns
+		});
+		const budgetInfo = resolveBudget({
+			budget: budgetArg,
+			model
 		});
 		const sourceText = budgetInfo.source === "model" ? `模型 ${model} → ${budgetInfo.modelPreset?.label ?? "预设"} ${budgetInfo.modelPreset?.context ?? budgetInfo.requested}` : budgetInfo.source === "explicit" ? `显式指定 ${budgetInfo.requested}` : budgetInfo.source === "clamped" ? `已裁剪到上限 ${budgetInfo.requested}` : `默认 ${budgetInfo.requested}`;
 		return textResult([
 			`<!-- 会话上下文：${read.session.title} -->`,
 			`<!-- 来源 ${client} · ${read.session.turns.length} 轮 · 预算 ${budgetInfo.effective}（${sourceText}，安全系数 92%） -->`,
+			...maxTurns != null ? [`<!-- 轮数限制：只导入最近 ${maxTurns} 轮，更早轮次已折叠（见概览与技术索引） -->`] : [],
 			`<!-- ${formatStats(sum.stats).replace(/\n/g, " | ")} -->`,
 			""
 		].join("\n") + sum.context);
@@ -4569,7 +4814,7 @@ function registerTools(server) {
 	});
 	server.tool({
 		name: "transfer_session",
-		description: "把一个客户端的历史会话直接转换到另一个客户端（不经客户端传内容）。",
+		description: "把一个客户端的历史会话直接转换到另一个客户端（不经客户端传内容）。\n【两种导入方式】①完整导入（默认，不传压缩参数）——逐事件完整拷贝；②压缩导入——传 budget / model / maxTurns / focus 任一参数即触发，先经压缩引擎生成上下文文档（单轮会话）再写入，长度可自定义，适合超大源会话导入小窗口目标端。\n【注意】压缩导入保留技术细节（代码/命令/路径/报错，见技术索引），但对话结构变为单轮文档；要完整对话结构就用完整导入。",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -4587,11 +4832,38 @@ function registerTools(server) {
 				},
 				title: {
 					type: "string",
-					description: "覆盖标题"
+					description: "覆盖标题（压缩导入时缺省为【导入】原标题）"
 				},
 				cwd: {
 					type: "string",
 					description: "覆盖工作目录"
+				},
+				budget: {
+					anyOf: [{ type: "number" }, { type: "string" }],
+					description: "压缩导入：token 预算（数字或 92k / 1.2万）。与 model 同时传时 budget 优先"
+				},
+				model: {
+					type: "string",
+					description: "压缩导入：按目标模型上下文自动定预算，如 glm-5、claude-sonnet-4-5"
+				},
+				maxTurns: {
+					type: "number",
+					minimum: 1,
+					description: "压缩导入：只导入最近 N 轮"
+				},
+				fidelity: {
+					type: "string",
+					enum: [
+						"full",
+						"balanced",
+						"compact"
+					],
+					description: "压缩导入：保真度，默认 balanced"
+				},
+				focus: {
+					type: "array",
+					items: { type: "string" },
+					description: "压缩导入：关注点关键字"
 				}
 			},
 			required: [
@@ -4606,13 +4878,20 @@ function registerTools(server) {
 		const fromId = String(args.fromId ?? "");
 		if (!fromId) throw new Error("fromId 不能为空");
 		if (from === to) throw new Error("源端与目标端相同，无需转换");
+		const budgetArg = assertBudget(args.budget);
+		const maxTurns = assertMaxTurns(args.maxTurns);
 		const losses = describeLoss(from, to);
 		const r = await transferSession({
 			from,
 			fromId,
 			to,
 			title: args.title ? String(args.title) : void 0,
-			cwd: args.cwd ? String(args.cwd) : void 0
+			cwd: args.cwd ? String(args.cwd) : void 0,
+			budget: budgetArg,
+			model: args.model ? String(args.model) : void 0,
+			fidelity: args.fidelity,
+			focus: Array.isArray(args.focus) ? args.focus.map(String) : void 0,
+			maxTurns
 		});
 		const lines = [
 			`✅ ${from} → ${to} 转换完成`,
@@ -4621,6 +4900,7 @@ function registerTools(server) {
 			`- 位置：\`${r.target.location}\``,
 			`- 记录数：${r.target.records}`
 		];
+		if (r.imported) lines.push(`- 导入方式：压缩导入（原始 ${r.imported.originalTokens} → 导入 ${r.imported.importedTokens} tokens，级别 ${r.imported.level}，保留 ${Math.round(r.imported.ratio * 100)}%）`);
 		if (losses.length > 0) {
 			lines.push("", "⚠️ 本次转换的已知损失：");
 			for (const l of losses) lines.push(`- ${l}`);
@@ -4646,12 +4926,17 @@ function registerTools(server) {
 					description: "会话 ID（必填）"
 				},
 				budget: {
-					type: "number",
-					description: "摘要目标 token，默认 8000"
+					anyOf: [{ type: "number" }, { type: "string" }],
+					description: "摘要目标 token，默认 8000。支持数字或 8k / 1.2万 字符串"
 				},
 				model: {
 					type: "string",
 					description: "模型名（可选，用于自动定预算；显式 budget 优先）"
+				},
+				maxTurns: {
+					type: "number",
+					minimum: 1,
+					description: "只摘要最近 N 轮"
 				}
 			},
 			required: ["client", "sessionId"]
@@ -4660,13 +4945,15 @@ function registerTools(server) {
 		const client = assertClient(args.client, "client");
 		const sessionId = String(args.sessionId ?? "");
 		if (!sessionId) throw new Error("sessionId 不能为空");
-		const budget = args.budget != null ? Number(args.budget) : 8e3;
+		const budget = args.budget != null ? assertBudget(args.budget) ?? 8e3 : 8e3;
+		const maxTurns = assertMaxTurns(args.maxTurns);
 		const model = args.model ? String(args.model) : void 0;
 		const read = await readSession(client, sessionId);
 		const sum = summarizeSession(read.session, {
 			budget,
 			model,
-			fidelity: "compact"
+			fidelity: "compact",
+			maxTurns
 		});
 		const lines = [
 			`# ${read.session.title}`,
@@ -4722,7 +5009,7 @@ function registerTools(server) {
 function createBridgeMcpServer() {
 	const server = new McpServer({
 		name: "dsh-codex-bridge",
-		version: "0.2.0"
+		version: "0.3.0"
 	});
 	registerTools(server);
 	return server;

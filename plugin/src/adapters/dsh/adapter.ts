@@ -23,7 +23,7 @@ import type {
   WriteOptions, WriteResult, SessionSummary, UirSession, UirTurn, UirStep, UirBlock,
 } from '../../uir/types.js';
 import { classifyText, isInjectedTemplate } from '../../uir/helpers.js';
-import { readDshSessionFile, writeDshSessionFile, listDshSessions } from '../../convert/dsh-store.js';
+import { readDshSessionFile, writeDshSessionFile, listDshSessions, peekDshSessionFile } from '../../convert/dsh-store.js';
 import { dshHome, dshHome as _dshHome } from '../../host/clients.js';
 import { projectKey, encodeSegment } from '../../host/paths.js';
 import type { DshEvent, DshHeader } from '../../shared/types.js';
@@ -53,44 +53,49 @@ export class DshAdapter implements SessionAdapter {
     return { available: true };
   }
 
+  /**
+   * 会话概要缓存（速度优化）：key = 文件路径，值 = mtime+size+概要。
+   * 列表页只需要标题/轮数/cwd，用 peekDshSessionFile 轻量读取；
+   * 文件未变（mtime+size 相同）直接复用缓存，重复 list_sessions 近乎零开销。
+   */
+  private listCache = new Map<string, { mtime: number; size: number; summary: SessionSummary }>();
+
   async list(): Promise<SessionSummary[]> {
     const rows = await listDshSessions(dshSessionsRoot());
     const out: SessionSummary[] = [];
+    const liveFiles = new Set<string>();
+
     for (const r of rows) {
+      liveFiles.add(r.filePath);
+      const cached = this.listCache.get(r.filePath);
+      if (cached && cached.mtime === r.mtime && cached.size === r.sizeBytes) {
+        out.push(cached.summary);
+        continue;
+      }
       try {
-        const s = readDshSessionFile(r.filePath);
-        let title = '';
-        let turns = 0;
-        let messages = 0;
-        for (const e of s.events) {
-          if (e.type === 'session/title') title = String((e.data as any)?.title ?? '');
-          if (e.type === 'turn/start') turns++;
-          if (e.type === 'user/message' || e.type === 'assistant/message') messages++;
-        }
-        // 无标题时用首条用户消息
-        if (!title) {
-          for (const e of s.events) {
-            if (e.type === 'user/message') {
-              const text = ((e.data as any)?.content ?? [])
-                .filter((b: any) => typeof b?.text === 'string')
-                .map((b: any) => b.text).join(' ');
-              if (text && !isInjectedTemplate(text)) { title = text.replace(/\s+/g, ' ').slice(0, 80); break; }
-            }
-          }
-        }
-        out.push({
+        const p = peekDshSessionFile(r.filePath);
+        const summary: SessionSummary = {
           client: 'dsh',
-          id: s.header.id,
-          title: title || (messages === 0 ? '(空会话)' : '(无标题)'),
-          cwd: s.header.cwd ?? '',
-          createdAt: s.header.createdAt,
+          id: p.header.id,
+          title: p.title || p.firstUserText || (p.turns === 0 ? '(空会话)' : '(无标题)'),
+          cwd: p.header.cwd ?? '',
+          createdAt: p.header.createdAt,
           updatedAt: r.mtime,
-          turns,
-        });
+          turns: p.turns,
+        };
+        this.listCache.set(r.filePath, { mtime: r.mtime, size: r.sizeBytes, summary });
+        out.push(summary);
       } catch {
         // 损坏会话跳过
+        this.listCache.delete(r.filePath);
       }
     }
+
+    // 清理已删除会话的缓存，避免长期驻留
+    for (const key of this.listCache.keys()) {
+      if (!liveFiles.has(key)) this.listCache.delete(key);
+    }
+
     return out.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 

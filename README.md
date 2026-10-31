@@ -187,11 +187,11 @@ GET  http://127.0.0.1:<DSH端口>/plugins/dsh-codex-bridge/mcp/tools   （调试
 | 工具 | 用途 |
 |---|---|
 | `list_clients` | 列出可用客户端与能力矩阵 |
-| `list_sessions` | 列会话（可按客户端/目录/关键字过滤） |
-| `get_context` | **核心**：取压缩上下文（支持 `model` 自动定预算 / `budget` 显式指定） |
+| `list_sessions` | 列会话（可按客户端/目录/关键字过滤；DSH 轻量扫描 + mtime 缓存，重复调用近乎零开销） |
+| `get_context` | **核心**：取压缩上下文。长度双维度自定义：`budget`/`model`（token）+ `maxTurns`（最近 N 轮） |
 | `push_context` | 把当前对话写入目标端 |
-| `transfer_session` | 端到端直接转换 |
-| `summarize_session` | 只生成摘要 |
+| `transfer_session` | 端到端直接转换。传 `budget`/`model`/`maxTurns`/`focus` 任一即**压缩导入**（长度可自定义） |
+| `summarize_session` | 只生成摘要（支持 `budget` 字符串与 `maxTurns`） |
 | `list_models` | 列出内置的模型上下文长度预设（31 个） |
 
 **典型用法**（在 Claude Code / Cursor 里说）：
@@ -203,7 +203,13 @@ GET  http://127.0.0.1:<DSH端口>/plugins/dsh-codex-bridge/mcp/tools   （调试
 > → `get_context({ client: 'dsh', sessionId: 'xxx', model: 'gemini-1.5-pro' })` → 1.84M 预算
 
 > 「只给我 32k 的摘要版」
-> → `get_context({ ..., budget: 32000 })`
+> → `get_context({ ..., budget: 32000 })`（字符串也行：`budget: '32k'` / `'1.2万'`）
+
+> 「只要最近 10 轮」
+> → `get_context({ ..., maxTurns: 10 })`（更早的折叠为概览，技术细节保留在文末索引）
+
+> 「把这个 Codex 会话转到 Zcode，压到 8k 以内」
+> → `transfer_session({ from: 'codex', fromId: 'xxx', to: 'zcode', budget: '8k' })` → 压缩导入
 
 > 「把这段对话存到 Zcode」
 > → 客户端调 `push_context({ target: 'zcode', messages: [...] })`
@@ -211,6 +217,8 @@ GET  http://127.0.0.1:<DSH端口>/plugins/dsh-codex-bridge/mcp/tools   （调试
 ### 四、上下文长度如何指定
 
 预算解析优先级：**显式 `budget` > `model` 预设 > 默认 200k**，硬上限 2M。
+`budget` 支持数字或字符串：`92000` / `'92k'` / `'1.5m'` / `'1.2万'` / `'128,000'`。
+轮数维度：`maxTurns: N` 只保留最近 N 轮（更早轮次折叠，其技术细节仍进技术索引）。
 
 | 模型 | 上下文窗口 | 实际可用（×92%） |
 |---|---|---|

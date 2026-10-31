@@ -74,7 +74,7 @@ const PATH_RE = PATH_CANDIDATE_RE;
  */
 const ERROR_RE = /(?:\b(?:Error|ERROR|Exception|FATAL|FAILED|panic|Traceback)\b[:：]?\s*[^\n]{0,200}|\berror\s+[A-Z]{1,4}\d{3,5}[^\n]{0,150}|\b[A-Za-z_][\w.]*\s+failed\b[^\n]{0,150})/g;
 const VERSION_RE = /\bv?\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?\b/g;
-const CMD_RE = /(?:pwsh|powershell|bash|sh|cmd|node|npm|pnpm|git|python|npx)\s+(?:-[A-Za-z]+\s+)*[^\n]{3,300}/g;
+const CMD_RE = /\b(?:pwsh|powershell|bash|sh|cmd|node|npm|pnpm|yarn|npx|pip3?|python3?|git|gh|docker|cargo|make|cmake|dotnet|conda|uv|winget|choco)\s+(?:-[A-Za-z]+\s+)*[^\n]{3,300}/g;
 
 export interface ProtectedPiece {
   kind: 'code' | 'inline-code' | 'path' | 'error' | 'version';
@@ -106,14 +106,16 @@ export function extractProtected(text: string): ProtectedPiece[] {
 // ───────────────────────── 压缩结果 ─────────────────────────
 
 export interface SummarizeOptions {
-  /** token 预算（显式指定，优先级最高） */
-  budget?: number;
+  /** token 预算（显式指定，优先级最高；支持 '92k' / '1.2万' 字符串） */
+  budget?: number | string;
   /** 模型名（用于自动查上下文长度，如 'claude-sonnet-4-5' → 200k） */
   model?: string;
   /** 保真度：full 尽量不压 / balanced 默认 / compact 更激进 */
   fidelity?: 'full' | 'balanced' | 'compact';
   /** 关注点（提升匹配内容的保留优先级，如 ['报错','API 参数']） */
   focus?: string[];
+  /** 只保留最近 N 轮，更早的折叠为概览（导入长度的第二维度：按轮数控制） */
+  maxTurns?: number;
 }
 
 export interface SummarizeStats {
@@ -138,6 +140,8 @@ export interface SummarizeStats {
     techIndexEntries?: number;
   };
   summarized: boolean;
+  /** maxTurns 轮数限制生效情况（未触发则为 undefined） */
+  maxTurnsApplied?: { total: number; kept: number };
 }
 
 export interface SummarizeResult {
@@ -189,8 +193,13 @@ export function summarizeSession(session: UirSession, opts: SummarizeOptions = {
     };
   }
 
-  // L0：不超预算，直接返回
-  if (stats.originalTokens <= budget || fidelity === 'full' && stats.originalTokens <= budget * 1.05) {
+  // maxTurns：把早期轮次强制折叠（即使预算充足也不整篇返回）
+  const foldCount = opts.maxTurns != null && Number.isFinite(opts.maxTurns) && opts.maxTurns >= 1
+    ? Math.max(0, session.turns.length - Math.floor(opts.maxTurns))
+    : 0;
+
+  // L0：不超预算，直接返回（有 maxTurns 折叠需求时不可走捷径）
+  if (foldCount === 0 && (stats.originalTokens <= budget || fidelity === 'full' && stats.originalTokens <= budget * 1.05)) {
     stats.returnedTokens = stats.originalTokens;
     stats.level = 'L0';
     return {
@@ -205,7 +214,7 @@ export function summarizeSession(session: UirSession, opts: SummarizeOptions = {
   const l1 = applyL1(session, stats);
   const l1Text = renderFull(l1);
   const l1Tokens = estimateTokens(l1Text);
-  if (l1Tokens <= budget) {
+  if (foldCount === 0 && l1Tokens <= budget) {
     stats.returnedTokens = l1Tokens;
     stats.level = 'L1';
     stats.summarized = true;
@@ -214,10 +223,13 @@ export function summarizeSession(session: UirSession, opts: SummarizeOptions = {
   }
 
   // L2 + L3：按轮次从新到旧分配预算
-  const { context, level } = applyL2L3(l1, budget, fidelity, opts.focus ?? [], stats);
+  const { context, level } = applyL2L3(l1, budget, fidelity, opts.focus ?? [], stats, foldCount);
   stats.returnedTokens = estimateTokens(context);
   stats.level = level;
   stats.summarized = true;
+  if (foldCount > 0) {
+    stats.maxTurnsApplied = { total: session.turns.length, kept: session.turns.length - foldCount };
+  }
   finishRatio(stats);
   return { context, outline: buildOutline(session), stats, budget: budgetInfo };
 }
@@ -285,6 +297,7 @@ function applyL2L3(
   fidelity: 'full' | 'balanced' | 'compact',
   focus: string[],
   stats: SummarizeStats,
+  foldCount = 0,
 ): { context: string; level: 'L2' | 'L3' } {
   const turns = session.turns;
   const n = turns.length;
@@ -296,17 +309,31 @@ function applyL2L3(
   const techIndexReserve = Math.min(Math.floor(budget * 0.18), 30_000);
   let remaining = budget - estimateTokens(headerText) - techIndexReserve - 200;
 
-  // 预计算每轮的两种渲染成本
-  const costs = turns.map((t) => ({
+  // ★ 提速：每轮的完整渲染只做一次，成本估算与最终输出共用；
+  //   L2 成本懒计算（按需 + 缓存，用克隆 stats，避免估算污染真实丢弃统计），
+  //   L0 轮次不再白算 L2 成本。
+  const fullTexts = turns.map(renderTurnFull);
+  const l2EstCache = new Map<number, number>();
+  const l2CostOf = (i: number): number => {
+    let tokens = l2EstCache.get(i);
+    if (tokens === undefined) {
+      const cloneStats: SummarizeStats = { ...stats, dropped: { ...stats.dropped }, preserved: { ...stats.preserved } };
+      tokens = estimateTokens(renderTurnL2(turns[i], focus, cloneStats));
+      l2EstCache.set(i, tokens);
+    }
+    return tokens;
+  };
+
+  // 预计算每轮的完整渲染成本
+  const costs = turns.map((t, i) => ({
     turn: t,
-    fullTokens: estimateTokens(renderTurnFull(t)),
-    l2Tokens: estimateTokens(renderTurnL2(t, focus, { ...stats, dropped: { ...stats.dropped }, preserved: { ...stats.preserved } })),
+    fullTokens: estimateTokens(fullTexts[i]),
     plan: 'L3' as 'L0' | 'L2' | 'L3',
   }));
 
-  // ── 第 1 步：最近轮次优先升到 L0（从最新往回）──
+  // ── 第 1 步：最近轮次优先升到 L0（从最新往回）；foldCount 之前的轮次强制折叠 ──
   const recentStart = Math.max(0, n - 3);
-  for (let i = n - 1; i >= recentStart; i--) {
+  for (let i = n - 1; i >= Math.max(recentStart, foldCount); i--) {
     if (costs[i].fullTokens <= remaining) {
       costs[i].plan = 'L0';
       remaining -= costs[i].fullTokens;
@@ -314,11 +341,11 @@ function applyL2L3(
   }
 
   // ── 第 2 步：中间轮次升到 L2（从新到旧）──
-  for (let i = recentStart - 1; i >= 0; i--) {
+  for (let i = recentStart - 1; i >= foldCount; i--) {
     if (costs[i].plan !== 'L3') continue;
-    if (costs[i].l2Tokens <= remaining) {
+    if (l2CostOf(i) <= remaining) {
       costs[i].plan = 'L2';
-      remaining -= costs[i].l2Tokens;
+      remaining -= l2CostOf(i);
     }
   }
 
@@ -328,9 +355,9 @@ function applyL2L3(
   while (upgraded && remaining > 500) {
     upgraded = false;
     // 先尝试 L2 → L0
-    for (let i = n - 1; i >= 0; i--) {
+    for (let i = n - 1; i >= foldCount; i--) {
       if (costs[i].plan !== 'L2') continue;
-      const delta = costs[i].fullTokens - costs[i].l2Tokens;
+      const delta = costs[i].fullTokens - l2CostOf(i);
       if (delta <= remaining) {
         costs[i].plan = 'L0';
         remaining -= delta;
@@ -340,11 +367,11 @@ function applyL2L3(
     }
     if (upgraded) continue;
     // 再尝试 L3 → L2
-    for (let i = n - 1; i >= 0; i--) {
+    for (let i = n - 1; i >= foldCount; i--) {
       if (costs[i].plan !== 'L3') continue;
-      if (costs[i].l2Tokens <= remaining) {
+      if (l2CostOf(i) <= remaining) {
         costs[i].plan = 'L2';
-        remaining -= costs[i].l2Tokens;
+        remaining -= l2CostOf(i);
         upgraded = true;
         break;
       }
@@ -359,10 +386,14 @@ function applyL2L3(
     parts.push(renderEarlySummary(earlyTurns.map((c) => c.turn)));
   }
 
-  for (const c of costs) {
-    if (c.plan === 'L3') continue;
-    if (c.plan === 'L0') parts.push(renderTurnFull(c.turn));
-    else parts.push(renderTurnL2(c.turn, focus, stats));
+  for (let i = 0; i < n; i++) {
+    const plan = costs[i].plan;
+    if (plan === 'L3') continue;
+    if (plan === 'L0') {
+      parts.push(fullTexts[i]);           // 复用已渲染文本
+    } else {
+      parts.push(renderTurnL2(turns[i], focus, stats));   // 真实统计只在最终渲染时计入
+    }
   }
 
   // ★ 技术索引：把全文去重后的关键技术片段集中保留在末尾。
@@ -553,10 +584,10 @@ function renderBlockFull(b: UirBlock): string {
 function renderTurnL2(turn: UirTurn, focus: string[], stats: SummarizeStats): string {
   const lines: string[] = [`## 第 ${turn.index + 1} 轮（摘要）`];
 
-  // 用户输入：保留原文（用户意图最重要）
+  // 用户输入：保留原文（用户意图最重要；长输入用技术保护截断，不丢代码/路径/报错）
   for (const b of turn.userMessages) {
     if (b.kind === 'text') {
-      lines.push(`**用户**：${demoteHeadings(truncate(b.text, 1500))}`);
+      lines.push(`**用户**：${demoteHeadings(truncatePreservingTech(b.text, 1500, stats))}`);
     }
   }
 
@@ -672,11 +703,17 @@ function compressText(text: string, focus: string[], stats: SummarizeStats): str
   const head = text.slice(0, Math.floor(keepChars * 0.6));
   const tail = text.slice(-Math.floor(keepChars * 0.25));
 
-  // 关注点命中
+  // 关注点命中（每个关键字最多取 3 处，覆盖首尾之外的中间内容）
   const focusHits: string[] = [];
   for (const kw of focus) {
-    const idx = text.indexOf(kw);
-    if (idx >= 0) focusHits.push(text.slice(Math.max(0, idx - 100), Math.min(text.length, idx + 300)));
+    if (!kw) continue;
+    let from = 0;
+    for (let k = 0; k < 3; k++) {
+      const idx = text.indexOf(kw, from);
+      if (idx < 0) break;
+      focusHits.push(text.slice(Math.max(0, idx - 100), Math.min(text.length, idx + 300)));
+      from = idx + kw.length;
+    }
   }
 
   const droppedChars = text.length - (head.length + tail.length);

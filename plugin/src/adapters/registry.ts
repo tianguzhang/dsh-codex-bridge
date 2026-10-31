@@ -7,6 +7,7 @@
  *   - 跨端转换（read A → UIR → write B）
  */
 import type { ClientKind, SessionAdapter, AdapterCapability, SessionSummary, ReadResult, WriteResult, UirSession } from '../uir/types.js';
+import { summarizeSession } from '../budget/summarize.js';
 import { claudeCodeAdapter } from './claude-code/adapter.js';
 import { zcodeAdapter } from './zcode/adapter.js';
 import { dshAdapter } from './dsh/adapter.js';
@@ -44,45 +45,75 @@ export function capabilityMatrix(): AdapterCapability[] {
     .filter((c): c is AdapterCapability => Boolean(c));
 }
 
-/** 列出所有可用客户端的会话 */
+/** 列出所有可用客户端的会话（各端并行探测，速度优化） */
 export async function listAllSessions(opts: {
   clients?: ClientKind[];
   limitPerClient?: number;
 } = {}): Promise<{ sessions: SessionSummary[]; errors: Array<{ client: ClientKind; message: string }> }> {
   const targets = opts.clients ?? availableAdapters();
-  const sessions: SessionSummary[] = [];
-  const errors: Array<{ client: ClientKind; message: string }> = [];
   const limit = opts.limitPerClient ?? 50;
 
-  for (const client of targets) {
+  const results = await Promise.all(targets.map(async (client): Promise<{
+    sessions: SessionSummary[];
+    errors: Array<{ client: ClientKind; message: string }>;
+  }> => {
     const adapter = getAdapter(client);
-    if (!adapter) continue;
+    if (!adapter) return { sessions: [], errors: [] };
     const probe = adapter.probe();
     if (!probe.available) {
-      errors.push({ client, message: probe.reason ?? '不可用' });
-      continue;
+      return { sessions: [], errors: [{ client, message: probe.reason ?? '不可用' }] };
     }
     try {
       const list = await adapter.list();
-      sessions.push(...list.slice(0, limit));
+      return { sessions: list.slice(0, limit), errors: [] };
     } catch (e) {
-      errors.push({ client, message: String((e as Error)?.message ?? e) });
+      return { sessions: [], errors: [{ client, message: String((e as Error)?.message ?? e) }] };
     }
-  }
+  }));
 
+  const sessions = results.flatMap((r) => r.sessions);
+  const errors = results.flatMap((r) => r.errors);
   return { sessions: sessions.sort((a, b) => b.updatedAt - a.updatedAt), errors };
 }
 
-/** 读取会话为 UIR */
+// ── 读取缓存（速度优化）──
+// get_context / summarize_session 常对同一会话反复调用（调预算、调轮数），
+// 解压 + 解析是主要成本。TTL 兜底数据新鲜度；写回目标端后自动失效对应条目。
+const READ_CACHE_TTL_MS = 5 * 60 * 1000;
+const READ_CACHE_MAX = 24;
+const readCache = new Map<string, { at: number; result: ReadResult }>();
+
+/** 清空读取缓存（测试 / 强制刷新用） */
+export function clearReadSessionCache(): void {
+  readCache.clear();
+}
+
+/** 读取会话为 UIR（带 TTL 缓存） */
 export async function readSession(client: ClientKind, sessionId: string): Promise<ReadResult> {
   const adapter = getAdapter(client);
   if (!adapter) {
     throw new Error(`客户端 ${client} 尚未支持 UIR 读取（当前支持：${availableAdapters().join(', ')}）`);
   }
-  return adapter.read({ sessionId });
+  const key = `${client}\u0000${sessionId}`;
+  const hit = readCache.get(key);
+  if (hit) {
+    if (Date.now() - hit.at < READ_CACHE_TTL_MS) {
+      readCache.delete(key);
+      readCache.set(key, hit);   // LRU 触碰
+      return hit.result;
+    }
+    readCache.delete(key);
+  }
+  const result = await adapter.read({ sessionId });
+  readCache.set(key, { at: Date.now(), result });
+  if (readCache.size > READ_CACHE_MAX) {
+    const oldest = readCache.keys().next().value;
+    if (oldest !== undefined) readCache.delete(oldest);
+  }
+  return result;
 }
 
-/** 把 UIR 写入指定客户端 */
+/** 把 UIR 写入指定客户端（写回后失效该目标的读取缓存） */
 export async function writeSession(
   client: ClientKind,
   session: UirSession,
@@ -92,13 +123,19 @@ export async function writeSession(
   if (!adapter) {
     throw new Error(`客户端 ${client} 尚未支持 UIR 写入（当前支持：${availableAdapters().join(', ')}）`);
   }
-  return adapter.write(session, opts);
+  const w = await adapter.write(session, opts);
+  if (w.ok) readCache.delete(`${client}\u0000${w.targetId}`);
+  return w;
 }
 
 /**
  * 跨端转换：从一端读到 UIR，再写入另一端。
  *
  * 这是 N×N 互通的核心：不需要 N² 个转换器，只要 2N 个适配器。
+ *
+ * 压缩导入（长度可自定义）：传 budget / model / maxTurns / focus 任一参数时，
+ * 不做逐事件完整拷贝，而是先经压缩引擎生成上下文文档（单轮会话）再写入目标端。
+ * 适合超大源会话导入小窗口目标端的场景。
  */
 export async function transferSession(params: {
   from: ClientKind;
@@ -106,15 +143,60 @@ export async function transferSession(params: {
   to: ClientKind;
   title?: string;
   cwd?: string;
+  /** 压缩导入：token 预算（数字或 '92k' / '1.2万' 字符串） */
+  budget?: number | string;
+  /** 压缩导入：按目标模型上下文自动定预算 */
+  model?: string;
+  /** 压缩导入：保真度 */
+  fidelity?: 'full' | 'balanced' | 'compact';
+  /** 压缩导入：关注点关键字 */
+  focus?: string[];
+  /** 压缩导入：只导入最近 N 轮 */
+  maxTurns?: number;
 }): Promise<{
   ok: boolean;
   source: { client: ClientKind; id: string; title: string; turns: number };
   target: { client: ClientKind; id: string; location: string; records: number };
   warnings: string[];
+  /** 压缩导入时的统计（完整导入时为 undefined） */
+  imported?: { originalTokens: number; importedTokens: number; ratio: number; level: string };
 }> {
   const read = await readSession(params.from, params.fromId);
-  const write = await writeSession(params.to, read.session, {
-    title: params.title,
+
+  const compress = params.budget != null || params.model != null
+    || (params.focus?.length ?? 0) > 0
+    || params.maxTurns != null;
+
+  let sessionToWrite = read.session;
+  let imported: { originalTokens: number; importedTokens: number; ratio: number; level: string } | undefined;
+  const warnings = [...read.warnings];
+
+  if (compress) {
+    const sum = summarizeSession(read.session, {
+      budget: params.budget,
+      model: params.model,
+      fidelity: params.fidelity,
+      focus: params.focus,
+      maxTurns: params.maxTurns,
+    });
+    const title = params.title ?? `【导入】${read.session.title}`.slice(0, 200);
+    const note = [
+      `> 🌉 本会话由 dsh-bridge 从 ${params.from} 压缩导入：`,
+      `> 原始 ${sum.stats.originalTokens} → 导入 ${sum.stats.returnedTokens} tokens`,
+      `>（级别 ${sum.stats.level}，保留 ${Math.round(sum.stats.compressionRatio * 100)}%；技术细节见文末技术索引）`,
+    ].join('\n');
+    sessionToWrite = compressedContextSession(read.session, `${note}\n\n${sum.context}`, title);
+    imported = {
+      originalTokens: sum.stats.originalTokens,
+      importedTokens: sum.stats.returnedTokens,
+      ratio: sum.stats.compressionRatio,
+      level: sum.stats.level,
+    };
+    warnings.push(`已压缩导入：原始 ${sum.stats.originalTokens} → ${sum.stats.returnedTokens} tokens（级别 ${sum.stats.level}），完整原文仍在源端 ${params.from}`);
+  }
+
+  const write = await writeSession(params.to, sessionToWrite, {
+    title: compress ? params.title : undefined,   // 压缩会话已带【导入】标题，显式 title 仍可覆盖
     cwd: params.cwd,
   });
 
@@ -136,7 +218,27 @@ export async function transferSession(params: {
       location: write.location,
       records: write.records,
     },
-    warnings: [...read.warnings, ...write.warnings],
+    warnings: [...warnings, ...write.warnings],
+    imported,
+  };
+}
+
+/** 把压缩后的上下文 markdown 包装成单轮 UIR 会话（供压缩导入写盘） */
+function compressedContextSession(src: UirSession, markdown: string, title: string): UirSession {
+  const now = Date.now();
+  return {
+    id: `transfer-${now}`,
+    title,
+    cwd: src.cwd,
+    createdAt: now,
+    updatedAt: now,
+    origin: { client: 'mcp', originalId: src.id },
+    turns: [{
+      index: 0,
+      startedAt: now,
+      userMessages: [{ kind: 'text', role: 'user', text: markdown, tier: 'high' }],
+      steps: [{ index: 0, blocks: [] }],
+    }],
   };
 }
 

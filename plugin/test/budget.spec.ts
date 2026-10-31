@@ -6,7 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import type { UirSession, UirTurn, UirBlock } from '../src/uir/types.js';
 import { summarizeSession, extractProtected } from '../src/budget/summarize.js';
-import { estimateTokens, estimateTokensHeuristic, effectiveBudget } from '../src/budget/tokens.js';
+import { estimateTokens, estimateTokensHeuristic, effectiveBudget, parseBudgetValue } from '../src/budget/tokens.js';
 
 // ── 构造测试会话 ──
 
@@ -55,6 +55,53 @@ describe('token 估算', () => {
   it('有效预算 = 请求预算 × 安全系数', () => {
     expect(effectiveBudget(200_000)).toBe(184_000);
     expect(effectiveBudget(1000)).toBeLessThanOrEqual(1000);
+  });
+
+  it('CJK 标点与全角符号按 1 token/字 估算', () => {
+    // 6 个 CJK 标点（，。：；！？）+ 5 个全角（（）＋－）→ 约 11
+    const t = estimateTokensHeuristic('，。：；！？（）＋－');
+    expect(t).toBeGreaterThanOrEqual(9);
+    expect(t).toBeLessThanOrEqual(12);
+  });
+});
+
+describe('预算字符串解析（长度自定义）', () => {
+  it('数字直接透传', () => {
+    expect(parseBudgetValue(92_000)).toBe(92_000);
+    expect(parseBudgetValue(1234.9)).toBe(1234);
+  });
+
+  it('支持 k / m 后缀', () => {
+    expect(parseBudgetValue('92k')).toBe(92_000);
+    expect(parseBudgetValue('92K')).toBe(92_000);
+    expect(parseBudgetValue('1.5m')).toBe(1_500_000);
+    expect(parseBudgetValue('0.5M')).toBe(500_000);
+  });
+
+  it('支持中文「万」', () => {
+    expect(parseBudgetValue('1.2万')).toBe(12_000);
+    expect(parseBudgetValue('9万')).toBe(90_000);
+  });
+
+  it('支持千分位与空白', () => {
+    expect(parseBudgetValue('128,000')).toBe(128_000);
+    expect(parseBudgetValue(' 92000 ')).toBe(92_000);
+  });
+
+  it('非法输入返回 undefined', () => {
+    expect(parseBudgetValue('abc')).toBeUndefined();
+    expect(parseBudgetValue('')).toBeUndefined();
+    expect(parseBudgetValue(-5)).toBeUndefined();
+    expect(parseBudgetValue(null)).toBeUndefined();
+    expect(parseBudgetValue(undefined)).toBeUndefined();
+  });
+
+  it('字符串预算走 resolveBudget 同一条链', async () => {
+    const { resolveBudget } = await import('../src/budget/tokens.js');
+    const r = resolveBudget({ budget: '92k' });
+    expect(r.source).toBe('explicit');
+    expect(r.requested).toBe(92_000);
+    expect(r.effective).toBe(84_640);
   });
 });
 
@@ -191,6 +238,51 @@ describe('摘要引擎', () => {
     // 两者都不超预算
     expect(balanced.stats.returnedTokens).toBeLessThanOrEqual(10_000);
     expect(compact.stats.returnedTokens).toBeLessThanOrEqual(10_000);
+  });
+
+  it('maxTurns：只保留最近 N 轮，早期折叠为概览', () => {
+    const turns: UirTurn[] = [];
+    for (let i = 0; i < 60; i++) {
+      turns.push(mkTurn(
+        i,
+        `第 ${i} 轮需求：处理 D:\\Proj\\Early${i}.cpp`,
+        `处理 Early${i}.cpp 的回复。` + '叙述内容。'.repeat(100),
+      ));
+    }
+    const session = mkSession(turns);
+    // 预算给足（不触发 token 压缩），只限制轮数
+    const r = summarizeSession(session, { budget: 2_000_000, maxTurns: 5 });
+
+    expect(r.stats.maxTurnsApplied).toEqual({ total: 60, kept: 5 });
+    // 最近轮次完整保留
+    expect(r.context).toContain('第 59 轮');
+    expect(r.context).toContain('Early59');
+    // 早期轮次折叠为概览（不出现完整正文）
+    expect(r.context).not.toContain('处理 Early20.cpp 的回复');
+    expect(r.context).toContain('概览');
+    // 但早期轮次的关键路径仍在技术索引里
+    expect(r.context).toContain('Early20');
+  });
+
+  it('maxTurns：轮数不超过总数时不触发折叠', () => {
+    const session = mkSession([
+      mkTurn(0, '需求 A', '回复 A'),
+      mkTurn(1, '需求 B', '回复 B'),
+    ]);
+    const r = summarizeSession(session, { budget: 200_000, maxTurns: 10 });
+    expect(r.stats.maxTurnsApplied).toBeUndefined();
+    expect(r.stats.level).toBe('L0');
+  });
+
+  it('maxTurns 与小预算组合：折叠 + 压缩同时生效且不超预算', () => {
+    const turns: UirTurn[] = [];
+    for (let i = 0; i < 80; i++) {
+      turns.push(mkTurn(i, `需求 ${i}`, '内容。'.repeat(300)));
+    }
+    const r = summarizeSession(mkSession(turns), { budget: 6_000, maxTurns: 10 });
+    expect(r.stats.returnedTokens).toBeLessThanOrEqual(6_000);
+    expect(r.stats.maxTurnsApplied).toEqual({ total: 80, kept: 10 });
+    expect(r.context).toContain('第 79 轮');
   });
 });
 

@@ -25,12 +25,16 @@ export function estimateTokensHeuristic(text: string): number {
     if (c < 0x80) ascii++;
     else if (
       (c >= 0x4e00 && c <= 0x9fff) ||   // CJK 统一汉字
+      (c >= 0x3400 && c <= 0x4dbf) ||   // CJK 扩展 A
       (c >= 0x3040 && c <= 0x30ff) ||   // 日文假名
+      (c >= 0x30a0 && c <= 0x30ff) ||   // 片假名（与上行重叠，无害）
+      (c >= 0x3000 && c <= 0x303f) ||   // CJK 标点（，。：「」等，实测约 1 token）
+      (c >= 0xff00 && c <= 0xffef) ||   // 全角形式（！？（）等）
       (c >= 0xac00 && c <= 0xd7af)      // 韩文
     ) cjk++;
     else other++;
   }
-  // 中文 1 token/字；ASCII 约 3.8 字符/token；其它（emoji/符号）约 1.5 字符/token
+  // 中文/CJK 标点 1 token/字；ASCII 约 3.8 字符/token；其它（emoji/符号）约 1.5 字符/token
   return Math.ceil(cjk * 1.0 + ascii / 3.8 + other / 1.5);
 }
 
@@ -51,6 +55,31 @@ export function setEncoder(fn: ((text: number) => number) | null): void {
 
 /** 安全余量：预算按 92% 使用（留出客户端包装开销） */
 export const BUDGET_SAFETY_RATIO = 0.92;
+
+/**
+ * 解析「长度」输入——数字或人类可读字符串。
+ *
+ * 支持：`92000` / `'92k'` / `'92K'` / `'1.5m'` / `'1.2万'` / `'9万'` / `'128,000'`。
+ * 返回 token 数；无法解析或非正数返回 undefined。
+ */
+export function parseBudgetValue(v: unknown): number | undefined {
+  if (v == null) return undefined;
+  if (typeof v === 'number') {
+    return Number.isFinite(v) && v > 0 ? Math.floor(v) : undefined;
+  }
+  if (typeof v !== 'string') return undefined;
+  const s = v.trim().toLowerCase().replace(/[,_\s]/g, '');
+  if (!s) return undefined;
+  const wan = s.match(/^(\d+(?:\.\d+)?)万$/);          // 中文习惯：1.2万
+  if (wan) return Math.floor(parseFloat(wan[1]) * 10_000);
+  const km = s.match(/^(\d+(?:\.\d+)?)([km])$/);       // 92k / 1.5m
+  if (km) {
+    const n = parseFloat(km[1]);
+    return Math.floor(km[2] === 'k' ? n * 1_000 : n * 1_000_000);
+  }
+  if (/^\d+$/.test(s)) return parseInt(s, 10);
+  return undefined;
+}
 
 /** 默认预算（未指定模型/预算时） */
 export const DEFAULT_BUDGET = 200_000;
@@ -139,15 +168,17 @@ export interface BudgetResolution {
  * 解析预算。
  *
  * 优先级：显式 budget > 模型预设 > 默认 200k
+ * budget 支持数字或字符串（'92k' / '1.2万'，见 parseBudgetValue）
  * 上限：MAX_BUDGET
  */
-export function resolveBudget(opts: { budget?: number; model?: string } = {}): BudgetResolution {
+export function resolveBudget(opts: { budget?: number | string; model?: string } = {}): BudgetResolution {
   let requested: number;
   let source: BudgetResolution['source'];
   let modelPreset: BudgetResolution['modelPreset'];
 
-  if (opts.budget != null && Number.isFinite(opts.budget) && opts.budget > 0) {
-    requested = Math.floor(opts.budget);
+  const explicit = parseBudgetValue(opts.budget);
+  if (explicit != null) {
+    requested = explicit;
     source = 'explicit';
   } else {
     const preset = contextForModel(opts.model);
