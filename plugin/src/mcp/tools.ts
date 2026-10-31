@@ -116,14 +116,22 @@ export function registerTools(server: McpServer): void {
   server.tool(
     {
       name: 'list_sessions',
-      description: '列出各客户端的会话。可按客户端、工作目录、关键字过滤。',
+      description:
+        '【用途】列出本机各客户端的历史会话，返回 Markdown 表格。'
+        + '\n【典型场景】用户说「看看我有哪些会话」「找找那个关于 XX 的会话」时调用。'
+        + '\n【下一步】拿到表格里的「会话 ID」后，可传给 get_context（读上下文）或 transfer_session（转换到别的端）。'
+        + '\n【注意】表格里的「会话 ID」是长字符串，不是标题；传给其他工具时必须用 ID 而不是标题。',
       inputSchema: {
         type: 'object',
         properties: {
-          client: { type: 'string', description: '限定客户端（dsh/codex/zcode/claude-code/workbuddy），不传则全部' },
-          query: { type: 'string', description: '标题或路径关键字' },
-          cwd: { type: 'string', description: '按工作目录过滤（包含匹配）' },
-          limit: { type: 'number', description: '每端返回上限，默认 20' },
+          client: {
+            type: 'string',
+            enum: ['dsh', 'codex', 'zcode', 'claude-code', 'workbuddy'],
+            description: '只列某个客户端（可选）。不传则列全部五端。',
+          },
+          query: { type: 'string', description: '关键字过滤（匹配标题或工作目录，不区分大小写）' },
+          cwd: { type: 'string', description: '按工作目录过滤（包含匹配），如 "FPS_Extraction"' },
+          limit: { type: 'number', description: '每个客户端最多返回多少条，默认 20，上限 100' },
         },
       },
     },
@@ -165,23 +173,49 @@ export function registerTools(server: McpServer): void {
     {
       name: 'get_context',
       description:
-        '获取指定会话的上下文，自动压缩到 token 预算内。'
-        + '预算可由 `model`（按模型上下文窗口自动定）或 `budget`（显式 token 数）指定，默认 200k。'
-        + '技术细节（代码块、命令、路径、报错、参数）优先保留，超出预算时早期轮次折叠为摘要。',
+        '【用途】把某个客户端的历史会话读成一段可直接用于对话的 Markdown 上下文。'
+        + '典型场景：用户说「把我在 DSH/Codex 里那个会话的上下文拉进来」，你就调这个工具。'
+        + '\n【调用前】先用 list_sessions 拿到 client 和 sessionId（sessionId 是会话 ID，不是标题）。'
+        + '\n【预算】三种方式：①传 model（按该模型上下文窗口自动定，推荐）'
+        + '②传 budget（显式 token 数）③都不传（默认 200k）。优先级 budget > model > 默认。'
+        + '\n【保留策略】技术细节（代码块、命令、文件路径、报错、参数、版本号）逐字保留；'
+        + '叙述性内容压缩；超出预算时早期轮次折叠为摘要，并在末尾附「技术索引」列出全部文件名/命令/报错。'
+        + '\n【返回】Markdown 文本，开头有 HTML 注释标明来源、预算、压缩统计。',
       inputSchema: {
         type: 'object',
         properties: {
-          client: { type: 'string', description: '客户端类型（必填）' },
-          sessionId: { type: 'string', description: '会话 ID（必填）' },
+          client: {
+            type: 'string',
+            enum: ['dsh', 'codex', 'zcode', 'claude-code', 'workbuddy'],
+            description: '会话所在的客户端。可选值见 enum；不确定有哪些可先调 list_clients。',
+          },
+          sessionId: {
+            type: 'string',
+            description: '会话 ID（必填）。从 list_sessions 返回的表格里取「会话 ID」那一列，'
+              + '是长字符串（如 session-xxx 或 UUID），不是标题。',
+          },
           model: {
             type: 'string',
-            description: '模型名（可选）。按模型上下文窗口自动定预算，'
-              + '如 claude-sonnet-4-5→200k、gpt-4.1→1M、gemini-1.5-pro→2M、deepseek-v4→256k、glm-5→200k。'
-              + '与 budget 同时传时 budget 优先。',
+            description: '模型名（推荐）。按该模型的上下文窗口自动定预算，'
+              + '如 claude-sonnet-4-5→184k、gpt-4.1→920k、gemini-1.5-pro→1.84M、deepseek-v4→235k、glm-5→184k。'
+              + '完整列表调 list_models。与 budget 同时传时 budget 优先。',
           },
-          budget: { type: 'number', description: '显式 token 预算（可选，优先级最高，上限 2M）' },
-          fidelity: { type: 'string', enum: ['full', 'balanced', 'compact'], description: '保真度，默认 balanced' },
-          focus: { type: 'array', items: { type: 'string' }, description: '关注点关键字（提升匹配内容保留优先级）' },
+          budget: {
+            type: 'number',
+            description: '显式 token 预算（可选，优先级最高）。例如 32000 / 128000 / 500000，上限 2,000,000。'
+              + '实际可用 = 该值 × 0.92（安全余量）。',
+          },
+          fidelity: {
+            type: 'string',
+            enum: ['full', 'balanced', 'compact'],
+            description: '压缩力度。full=尽量不压（可能超预算）、balanced=默认平衡、compact=更激进压缩。默认 balanced。',
+          },
+          focus: {
+            type: 'array',
+            items: { type: 'string' },
+            description: '关注点关键字（可选）。命中这些词的内容会提升保留优先级，'
+              + '如 ["报错", "API 参数", "数据库迁移"]。',
+          },
         },
         required: ['client', 'sessionId'],
       },
