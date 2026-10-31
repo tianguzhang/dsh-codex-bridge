@@ -3,7 +3,7 @@
   "displayName": "会话桥接",
   "description": "打通 Codex / DeepSeek Harness / Zcode / Claude Code / WorkBuddy 五端会话，支持双向导入导出与 MCP 通用接入。",
   "version": "0.3.0",
-  "author": "ztg-pty",
+  "author": "tianguzhang",
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",

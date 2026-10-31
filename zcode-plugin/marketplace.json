@@ -1,6 +1,6 @@
 {
   "name": "dev-dsh-codex-bridge",
-  "owner": { "name": "ztg-pty" },
+  "owner": { "name": "tianguzhang" },
   "plugins": [
     {
       "name": "dsh-bridge",

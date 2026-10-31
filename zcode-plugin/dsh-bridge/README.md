@@ -1,6 +1,6 @@
 # dsh-bridge（Zcode 插件）
 
-[dsh-codex-bridge](https://github.com/ztg-pty/dsh-codex-bridge) 的 Zcode 插件层：把 DeepSeek Harness 插件「会话桥接」的全部能力搬到 Zcode——MCP 同功能 + UI 功能转技能/命令。
+[dsh-codex-bridge](https://github.com/tianguzhang/dsh-codex-bridge) 的 Zcode 插件层：把 DeepSeek Harness 插件「会话桥接」的全部能力搬到 Zcode——MCP 同功能 + UI 功能转技能/命令。
 
 ## 组件
 

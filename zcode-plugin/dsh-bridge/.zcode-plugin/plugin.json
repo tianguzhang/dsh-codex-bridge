@@ -2,7 +2,7 @@
   "name": "dsh-bridge",
   "version": "0.2.0",
   "description": "跨端会话桥接：DSH / Codex / Zcode / Claude Code / WorkBuddy 五端会话上下文互相拉取、转换、写回。MCP 工具 + 技能 + 命令一体化。",
-  "author": { "name": "ztg-pty" },
+  "author": { "name": "tianguzhang" },
   "keywords": ["session", "bridge", "mcp", "codex", "dsh", "migration"],
   "mcpServers": "./.mcp.json",
   "skills": "./skills",
