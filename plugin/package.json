@@ -76,10 +76,11 @@
     "vitest": "^4.1.8"
   },
   "scripts": {
-    "build": "tsdown && node scripts/build-client.mjs",
+    "build": "tsdown && node scripts/build-client.mjs && node ../scripts/sync-zcode.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "build:client": "node scripts/build-client.mjs"
+    "build:client": "node scripts/build-client.mjs",
+    "build:zcode": "node ../scripts/sync-zcode.mjs"
   },
   "icon": "./assets/icon.svg",
   "license": "MIT"

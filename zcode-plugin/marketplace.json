@@ -1,0 +1,16 @@
+{
+  "name": "dev-dsh-codex-bridge",
+  "owner": { "name": "ztg-pty" },
+  "plugins": [
+    {
+      "name": "dsh-bridge",
+      "source": "./dsh-bridge",
+      "version": "0.1.0",
+      "description": "Cross-client session bridge: pull, transfer and save conversation context across DSH / Codex / Zcode / Claude Code / WorkBuddy. Ships the dsh-bridge MCP server plus skills and commands.",
+      "displayName": "Session Bridge",
+      "displayName_i18n": { "zh-CN": "会话桥接" },
+      "description_i18n": { "zh-CN": "跨端会话桥接：五端会话上下文互相拉取、转换、写回。内置 dsh-bridge MCP（7 工具）+ 技能 + 命令。" },
+      "category": "developer-tools"
+    }
+  ]
+}

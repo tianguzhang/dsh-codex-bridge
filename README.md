@@ -96,6 +96,26 @@ powershell -ExecutionPolicy Bypass -File scripts/rollback.ps1
 
 ---
 
+## Zcode 插件层（dsh-bridge）
+
+同一套能力的 Zcode 原生插件，位于 [`zcode-plugin/`](zcode-plugin/)：**MCP 同功能 + DSH 插件 UI 功能全部转换**。
+
+| 组件 | 内容 |
+|---|---|
+| MCP（7 工具） | `server/mcp-stdio.js` 自包含产物，manifest `mcpServers` 声明，装上即用，无需手动配 MCP |
+| 技能 `session-bridge` | DSH UI 功能 → 工具调用规则的完整工作流（ID 不是标题、预算优先级、损失转述等铁律） |
+| 命令 ×5 | `/dsh-bridge:bridge-sessions` `bridge-context` `bridge-transfer` `bridge-save` `bridge-status` |
+
+功能对照：跨端转换对话框 → `bridge-transfer`；导入/导出 → `bridge-save` / `transfer_session`；上下文预览+预算选择 → `bridge-context`；客户端状态页 → `bridge-status`。
+
+**安装**：Zcode → Plugin Marketplace → Add → Add Plugin Marketplace → 粘贴本仓库 `zcode-plugin/` 目录 → 在「dev-dsh-codex-bridge」市场里安装「会话桥接」→ 重启。
+
+> 之前手动配置过 `dsh-bridge` MCP 的（如 `~/.zcode/cli/config.json`），装插件后删掉手动配置，避免同名重复注册。
+
+**维护**：`plugin/lib/mcp-stdio.js` 是唯一来源；`npm run build`（plugin/）已自动同步到 `zcode-plugin/dsh-bridge/server/`，也可手动 `node scripts/sync-zcode.mjs`。
+
+---
+
 ## 使用
 
 ### 一、UI 操作（DSH 插件内）
