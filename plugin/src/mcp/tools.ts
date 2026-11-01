@@ -104,7 +104,7 @@ export function registerTools(server: McpServer): void {
   server.tool(
     {
       name: 'list_clients',
-      description: '列出本机可用的编程客户端（DSH / Codex / Zcode / Claude Code / WorkBuddy）及其能力与损失提示。',
+      description: '列出本机可用的编程客户端（DSH / Codex / Zcode / Claude Code / WorkBuddy / 豆包）及其能力与损失提示。豆包为只读端（可导出，不可写入）。',
       inputSchema: { type: 'object', properties: {} },
     },
     async () => {
@@ -146,8 +146,8 @@ export function registerTools(server: McpServer): void {
         properties: {
           client: {
             type: 'string',
-            enum: ['dsh', 'codex', 'zcode', 'claude-code', 'workbuddy'],
-            description: '只列某个客户端（可选）。不传则列全部五端。',
+            enum: ['dsh', 'codex', 'zcode', 'claude-code', 'workbuddy', 'doubao'],
+            description: '只列某个客户端（可选）。不传则列全部六端。',
           },
           query: { type: 'string', description: '关键字过滤（匹配标题或工作目录，不区分大小写）' },
           cwd: { type: 'string', description: '按工作目录过滤（包含匹配），如 "FPS_Extraction"' },
@@ -207,7 +207,7 @@ export function registerTools(server: McpServer): void {
         properties: {
           client: {
             type: 'string',
-            enum: ['dsh', 'codex', 'zcode', 'claude-code', 'workbuddy'],
+            enum: ['dsh', 'codex', 'zcode', 'claude-code', 'workbuddy', 'doubao'],
             description: '会话所在的客户端。可选值见 enum；不确定有哪些可先调 list_clients。',
           },
           sessionId: {
@@ -523,7 +523,7 @@ export function registerTools(server: McpServer): void {
 
 /** 创建并配置好工具的 MCP 服务端 */
 export function createBridgeMcpServer(): McpServer {
-  const server = new McpServer({ name: 'dsh-codex-bridge', version: '0.3.0' });
+  const server = new McpServer({ name: 'dsh-codex-bridge', version: '0.4.0' });
   registerTools(server);
   return server;
 }

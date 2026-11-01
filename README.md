@@ -1,6 +1,6 @@
 # DSH 会话桥接（dsh-codex-bridge）
 
-把 **Codex**、**DeepSeek Harness（DSH）**、**Zcode**、**Claude Code**、**WorkBuddy AI** 五端的会话历史互相打通，并提供 **MCP Server** 让任意支持 MCP 的客户端接入。
+把 **Codex**、**DeepSeek Harness（DSH）**、**Zcode**、**Claude Code**、**WorkBuddy AI**、**豆包** 六端的会话历史互相打通，并提供 **MCP Server** 让任意支持 MCP 的客户端接入。
 
 > 一个 DSH 插件 + 一个独立 MCP 服务：
 > 在任意客户端里干活，历史随时搬到另一端继续。
@@ -16,7 +16,7 @@
 
 | 能力 | 说明 |
 |---|---|
-| **五端互通** | Codex / DSH / Zcode / Claude Code / WorkBuddy 任意两端互转（20 条路径） |
+| **六端互通** | Codex / DSH / Zcode / Claude Code / WorkBuddy 任意两端互转；豆包只读（可导出到任意端） |
 | **上下文压缩** | 自动压到 200k token 内，技术细节（代码/命令/路径/报错）优先保留 |
 | **MCP Server** | 6 个工具，任意 MCP 客户端可取/存上下文 |
 | **UI 界面** | DSH 插件内可视化操作：跨端转换、上下文预览、日志 |
@@ -279,7 +279,7 @@ L3 骨架   → 早期轮次折叠成摘要句
 
 ---
 
-## 五端存储格式（实测）
+## 六端存储格式（实测）
 
 | 客户端 | 存储位置 | 结构 |
 |---|---|---|
@@ -288,9 +288,10 @@ L3 骨架   → 早期轮次折叠成摘要句
 | **Zcode** | `~/.zcode/cli/db/db.sqlite` | SQLite（session/message/part 三表） |
 | **Claude Code** | `~/.claude/projects/<cwd编码>/<id>.jsonl` | JSONL + parentUuid 链 |
 | **WorkBuddy** | `~/.workbuddy-ai/workbuddy.db` + `projects/<编码>/<id>.jsonl` | SQLite + JSONL |
+| **豆包** | `%LOCALAPPDATA%/Doubao/User Data/Default/.doubao/agent_mode/workspace/.sessions/<id>/agents/*/system/trajectory.jsonl` | OpenAI 风格 JSONL 轨迹 + assignment.md 需求记录；**只读**（云端会话） |
 
-所有路径从 `os.homedir()` + 环境变量推导，支持覆盖：
-`DSH_HOME` / `CODEX_HOME` / `ZCODE_HOME` / `CLAUDE_HOME` / `WORKBUDDY_HOME`
+所有路径从 `os.homedir()` / `%LOCALAPPDATA%` + 环境变量推导，支持覆盖：
+`DSH_HOME` / `CODEX_HOME` / `ZCODE_HOME` / `CLAUDE_HOME` / `WORKBUDDY_HOME` / `DOUBAO_HOME`
 
 ---
 
@@ -303,7 +304,7 @@ dsh-codex-bridge/
 │   │   ├── uir/                 # 统一中间表示
 │   │   │   ├── types.ts         # UIR 类型 + 适配器接口
 │   │   │   └── helpers.ts       # 价值分级、特征检测、校验
-│   │   ├── adapters/            # 五端适配器
+│   │   ├── adapters/            # 六端适配器
 │   │   │   ├── registry.ts      # 注册表 + 跨端转换
 │   │   │   ├── dsh/adapter.ts
 │   │   │   ├── codex/adapter.ts
@@ -376,6 +377,17 @@ dsh-codex-bridge/
 | 写入顺序 | **必须先写数据库再写文件**，否则目录被清理 |
 | 目录名 | `D:/x` → `d-x`（盘符小写） |
 | `user_id` | 三级兜底：会话行 → `user-<uuid>-personal` 目录 → 报错 |
+
+### 豆包侧
+
+| 约束 | 说明 |
+|---|---|
+| 定位 | 智能体（编程/电脑操作）模式的本地轨迹；普通云聊不落盘，读不到 |
+| 对话本体 | `.sessions/<convId>/agents/*/system/trajectory.jsonl`（OpenAI 风格行，**无逐行时间戳**） |
+| 标题/时间 | 来自 `assignment.md`（`## [ISO时间] 需求` 追加记录）；需求数=用户轮数时按轮对齐时间 |
+| **只读** | 云端智能体会话，本地轨迹是运行时状态，写入不可见 → `canWrite=false`，写入端会收到中文提示 |
+| IndexedDB | `chrome_doubao-chat_0.indexeddb.leveldb` 只存会话列表缓存（V8 序列化+snappy），消息大值走 blob；不解析，标题全部走 assignment.md |
+| 会话工作区 | `~/Doubao/chats/<日期>/<会话>/` 是沙箱产物目录，**不是**对话存储 |
 
 ---
 

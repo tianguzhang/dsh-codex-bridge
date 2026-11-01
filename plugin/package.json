@@ -1,8 +1,8 @@
 {
   "name": "dsh-codex-bridge",
   "displayName": "会话桥接",
-  "description": "打通 Codex / DeepSeek Harness / Zcode / Claude Code / WorkBuddy 五端会话，支持双向导入导出与 MCP 通用接入。",
-  "version": "0.3.0",
+  "description": "打通 Codex / DeepSeek Harness / Zcode / Claude Code / WorkBuddy / 豆包 六端会话，支持双向导入导出与 MCP 通用接入。",
+  "version": "0.4.0",
   "author": "tianguzhang",
   "keywords": [
     "dsh-plugin",

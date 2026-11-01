@@ -3,7 +3,7 @@ description: 把当前对话写回目标客户端存为新会话（dsh-bridge）
 argument-hint: <目标端> [标题]
 ---
 
-用 dsh-bridge MCP 的 push_context 把本会话当前进展写为目标端（$ARGUMENTS 第 1 段，dsh/codex/zcode/claude-code/workbuddy）的新会话，其余参数作为标题。
+用 dsh-bridge MCP 的 push_context 把本会话当前进展写为目标端（$ARGUMENTS 第 1 段，dsh/codex/zcode/claude-code/workbuddy；豆包为云端会话不支持作为写入目标）的新会话，其余参数作为标题。
 
 步骤：
 

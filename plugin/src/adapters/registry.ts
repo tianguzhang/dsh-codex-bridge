@@ -13,12 +13,13 @@ import { zcodeAdapter } from './zcode/adapter.js';
 import { dshAdapter } from './dsh/adapter.js';
 import { codexAdapter } from './codex/adapter.js';
 import { workbuddyAdapter } from './workbuddy/adapter.js';
+import { doubaoAdapter } from './doubao/adapter.js';
 
 /**
- * 全部五端的 UIR 适配器。
+ * 全部六端的 UIR 适配器。
  *
  * 每个适配器都实现 `probe / list / read / write`，
- * 因此任意两端都能通过 `transferSession` 互转。
+ * 因此可互转的任意两端都能通过 `transferSession` 互通（豆包只读）。
  */
 const ADAPTERS: Partial<Record<ClientKind, SessionAdapter>> = {
   'claude-code': claudeCodeAdapter,
@@ -26,6 +27,7 @@ const ADAPTERS: Partial<Record<ClientKind, SessionAdapter>> = {
   dsh: dshAdapter,
   codex: codexAdapter,
   workbuddy: workbuddyAdapter,
+  doubao: doubaoAdapter,
 };
 
 /** 按客户端获取适配器 */
@@ -113,7 +115,7 @@ export async function readSession(client: ClientKind, sessionId: string): Promis
   return result;
 }
 
-/** 把 UIR 写入指定客户端（写回后失效该目标的读取缓存） */
+/** 把 UIR 写入指定客户端（写回后失效该目标的读取缓存；只读端给友好中文提示） */
 export async function writeSession(
   client: ClientKind,
   session: UirSession,
@@ -122,6 +124,9 @@ export async function writeSession(
   const adapter = getAdapter(client);
   if (!adapter) {
     throw new Error(`客户端 ${client} 尚未支持 UIR 写入（当前支持：${availableAdapters().join(', ')}）`);
+  }
+  if (adapter.capability.canWrite === false) {
+    throw new Error(`${adapter.capability.label} 暂不支持写入（只读端），可从该端读取导出到其他端`);
   }
   const w = await adapter.write(session, opts);
   if (w.ok) readCache.delete(`${client}\u0000${w.targetId}`);

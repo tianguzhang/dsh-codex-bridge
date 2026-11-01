@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-export type ClientKind = 'dsh' | 'codex' | 'zcode' | 'claude-code' | 'workbuddy';
+export type ClientKind = 'dsh' | 'codex' | 'zcode' | 'claude-code' | 'workbuddy' | 'doubao';
 
 export interface ClientStatus {
   kind: ClientKind;
@@ -69,6 +69,18 @@ export function claudeCodeHome(): string {
 /** WorkBuddy 根目录 */
 export function workbuddyHome(): string {
   return envHome('WORKBUDDY_HOME', '.workbuddy-ai');
+}
+
+/**
+ * 豆包（Doubao 桌面版）User Data 目录。
+ * 默认：%LOCALAPPDATA%/Doubao/User Data（Electron profile 根），
+ * 智能体会话在其下 Default/.doubao/agent_mode/workspace/.sessions/。
+ */
+export function doubaoUserData(): string {
+  const v = process.env['DOUBAO_HOME']?.trim();
+  if (v) return v;
+  const localAppData = process.env['LOCALAPPDATA']?.trim() || path.join(home(), 'AppData', 'Local');
+  return path.join(localAppData, 'Doubao', 'User Data');
 }
 
 /** 统计目录下的文件数（浅层，失败返回 undefined） */
@@ -170,12 +182,29 @@ export function probeClient(kind: ClientKind): ClientStatus {
         ...(detected ? {} : { reason: `未找到 WorkBuddy 数据库：${db}` }),
       };
     }
+    case 'doubao': {
+      const root = doubaoUserData();
+      const sessions = path.join(root, 'Default', '.doubao', 'agent_mode', 'workspace', '.sessions');
+      const detected = fs.existsSync(sessions);
+      // 会话数 = .sessions 下的目录数（智能体会话每会话一个目录）
+      let sessionCount: number | undefined;
+      if (detected) {
+        try { sessionCount = fs.readdirSync(sessions).filter((n) => !n.startsWith('.')).length; } catch { /* 忽略 */ }
+      }
+      return {
+        kind, label: '豆包', home: root, detected,
+        canRead: detected,
+        canWrite: false,   // 云端智能体会话，本地轨迹为运行时状态，写入不可见
+        sessionCount,
+        ...(detected ? {} : { reason: `未找到豆包智能体会话目录：${sessions}（需在豆包里用过智能体/编程模式）` }),
+      };
+    }
   }
 }
 
 /** 探测所有客户端 */
 export function probeAllClients(): ClientStatus[] {
-  const kinds: ClientKind[] = ['dsh', 'codex', 'zcode', 'claude-code', 'workbuddy'];
+  const kinds: ClientKind[] = ['dsh', 'codex', 'zcode', 'claude-code', 'workbuddy', 'doubao'];
   return kinds.map(probeClient);
 }
 

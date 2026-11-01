@@ -22,7 +22,7 @@
 ## 环境要求
 
 - Node ≥ 22.19 或 ≥ 24（依赖内置 `node:sqlite`）
-- 五端客户端（DSH/Codex/Zcode/Claude Code/WorkBuddy）按需：被读取/写入的那一端要安装过且至少使用过一次
+- 六端客户端（DSH/Codex/Zcode/Claude Code/WorkBuddy/豆包）按需：被读取/写入的那一端要安装过且至少使用过一次；豆包只读（云端会话，可导出不可写入）
 
 ## 安装（本地开发市场）
 

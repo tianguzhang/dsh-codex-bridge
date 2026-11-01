@@ -5,7 +5,7 @@ argument-hint: <客户端> <会话ID或标题关键字> [预算如 92k/1.2万 | 
 
 用 dsh-bridge MCP 的 get_context 把历史会话变成可继续工作的上下文。参数「$ARGUMENTS」按空格拆分：
 
-1. 第 1 段：client（dsh/codex/zcode/claude-code/workbuddy）
+1. 第 1 段：client（dsh/codex/zcode/claude-code/workbuddy/doubao）
 2. 第 2 段：sessionId。若不是长 ID 而是标题关键字，先调 list_sessions 过滤拿到真实「会话 ID」，多个候选时向用户确认
 3. 第 3 段（可选）长度控制：
    - `92k` / `1.2万` / 纯数字 → budget

@@ -1,11 +1,11 @@
 ---
 name: session-bridge
-description: 跨端会话桥接工作流。当用户要跨客户端迁移/导入/导出会话、拉取 DSH/Codex/Zcode/Claude Code/WorkBuddy 的历史上下文继续干活、把当前对话存回某个客户端、或查看各端会话列表与状态时使用。
+description: 跨端会话桥接工作流。当用户要跨客户端迁移/导入/导出会话、拉取 DSH/Codex/Zcode/Claude Code/WorkBuddy/豆包 的历史上下文继续干活、把当前对话存回某个客户端、或查看各端会话列表与状态时使用。
 ---
 
 # 会话桥接（dsh-bridge）
 
-本技能把 DeepSeek Harness 插件「会话桥接」的 UI 功能（跨端转换对话框、导入/导出、上下文预算选择、客户端状态页）转换为模型可直接执行的工作流。底层是 dsh-bridge MCP 的 7 个工具；MCP 未加载时提示用户安装/启用 dsh-bridge 插件。
+本技能把 DeepSeek Harness 插件「会话桥接」的 UI 功能（跨端转换对话框、导入/导出、上下文预算选择、客户端状态页）转换为模型可直接执行的工作流。底层是 dsh-bridge MCP 的 7 个工具；MCP 未加载时提示用户安装/启用 dsh-bridge 插件。六端中**豆包是只读端**（云端智能体会话，可导出到任意端，不能作为写入目标）。
 
 ## 工具速查（DSH 插件功能 → MCP 工具）
 
@@ -16,7 +16,7 @@ description: 跨端会话桥接工作流。当用户要跨客户端迁移/导入
 | 跨端转换对话框 | transfer_session | 传 budget/model/maxTurns/focus 任一即压缩导入（长度可自定义） |
 | 导出对话框（存回） | push_context | 把当前对话写为目标端新会话 |
 | 快速了解历史 | summarize_session | 只出大纲 + 摘要；支持 budget 字符串与 maxTurns |
-| 设置页/客户端状态 | list_clients | 五端检测状态、能力矩阵、未检测原因 |
+| 设置页/客户端状态 | list_clients | 六端检测状态、能力矩阵、未检测原因 |
 | 模型预算表 | list_models | 上下文长度预设（用于 get_context 的 model 参数） |
 
 ## 铁律
@@ -26,7 +26,8 @@ description: 跨端会话桥接工作流。当用户要跨客户端迁移/导入
 3. **transfer_session 两种导入**：不传压缩参数=完整导入（保留对话结构）；传 budget/model/maxTurns/focus 任一=压缩导入（单轮上下文文档，超大源会话导小窗口目标端用）。压缩导入的统计要汇报给用户。
 4. **transfer_session 返回的「已知损失」必须逐条转述给用户**（如加密内容占位、子代理降级），不能只报成功。
 5. **push_context 的 messages 要结构化**：role 只能是 user/assistant/tool；代码块、命令、路径、报错逐字保留，不要改写压缩。
-6. 所有报错都是中文，原文转述即可，不要自行猜测原因。
+6. **豆包只能作为源端**：transfer_session/push_context 的目标传 doubao 会报「暂不支持写入」，提前向用户说明。
+7. 所有报错都是中文，原文转述即可，不要自行猜测原因。
 
 ## 典型流程
 

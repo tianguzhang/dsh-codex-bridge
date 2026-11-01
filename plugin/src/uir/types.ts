@@ -11,7 +11,7 @@
  *   4. 可裁剪 —— 每个块带价值等级，供 Token 预算器决定裁剪优先级
  */
 
-export type ClientKind = 'dsh' | 'codex' | 'zcode' | 'claude-code' | 'workbuddy' | 'mcp';
+export type ClientKind = 'dsh' | 'codex' | 'zcode' | 'claude-code' | 'workbuddy' | 'doubao' | 'mcp';
 
 /** 信息价值等级（Token 预算器据此裁剪） */
 export type ValueTier =

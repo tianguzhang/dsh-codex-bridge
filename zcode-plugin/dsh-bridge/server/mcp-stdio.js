@@ -1101,6 +1101,17 @@ function claudeCodeHome() {
 function workbuddyHome() {
 	return envHome("WORKBUDDY_HOME", ".workbuddy-ai");
 }
+/**
+* 豆包（Doubao 桌面版）User Data 目录。
+* 默认：%LOCALAPPDATA%/Doubao/User Data（Electron profile 根），
+* 智能体会话在其下 Default/.doubao/agent_mode/workspace/.sessions/。
+*/
+function doubaoUserData() {
+	const v = process.env["DOUBAO_HOME"]?.trim();
+	if (v) return v;
+	const localAppData = process.env["LOCALAPPDATA"]?.trim() || path.join(home(), "AppData", "Local");
+	return path.join(localAppData, "Doubao", "User Data");
+}
 /** 统计目录下的文件数（浅层，失败返回 undefined） */
 function countFiles(dir, predicate) {
 	let n = 0;
@@ -1207,6 +1218,25 @@ function probeClient(kind) {
 				...detected ? {} : { reason: `未找到 WorkBuddy 数据库：${db}` }
 			};
 		}
+		case "doubao": {
+			const root = doubaoUserData();
+			const sessions = path.join(root, "Default", ".doubao", "agent_mode", "workspace", ".sessions");
+			const detected = fs.existsSync(sessions);
+			let sessionCount;
+			if (detected) try {
+				sessionCount = fs.readdirSync(sessions).filter((n) => !n.startsWith(".")).length;
+			} catch {}
+			return {
+				kind,
+				label: "豆包",
+				home: root,
+				detected,
+				canRead: detected,
+				canWrite: false,
+				sessionCount,
+				...detected ? {} : { reason: `未找到豆包智能体会话目录：${sessions}（需在豆包里用过智能体/编程模式）` }
+			};
+		}
 	}
 }
 /** 探测所有客户端 */
@@ -1216,7 +1246,8 @@ function probeAllClients() {
 		"codex",
 		"zcode",
 		"claude-code",
-		"workbuddy"
+		"workbuddy",
+		"doubao"
 	].map(probeClient);
 }
 /**
@@ -1690,7 +1721,7 @@ async function openDb$1(readOnly) {
 	const mod = await import("node:sqlite");
 	return readOnly ? new mod.DatabaseSync(zcodeDbFile(), { readOnly: true }) : new mod.DatabaseSync(zcodeDbFile());
 }
-function safeJson$3(s) {
+function safeJson$4(s) {
 	if (typeof s !== "string") return s ?? null;
 	try {
 		return JSON.parse(s);
@@ -1812,7 +1843,7 @@ var ZcodeAdapter = class {
 			try {
 				const entry = db.prepare("SELECT data FROM session_entry WHERE session_id = ? AND type = 'runtime/model_selection' LIMIT 1").get(opts.sessionId);
 				if (entry?.data) {
-					const d = safeJson$3(entry.data);
+					const d = safeJson$4(entry.data);
 					const ms = d?.modelSelection ?? d;
 					if (ms) modelInfo = {
 						provider: ms.providerId ? String(ms.providerId) : void 0,
@@ -1827,14 +1858,14 @@ var ZcodeAdapter = class {
 			for (const p of parts) {
 				const mid = String(p.message_id);
 				if (!partsByMsg.has(mid)) partsByMsg.set(mid, []);
-				partsByMsg.get(mid).push(safeJson$3(p.data));
+				partsByMsg.get(mid).push(safeJson$4(p.data));
 			}
 			const turns = [];
 			let current = null;
 			let step = null;
 			let title = String(sess.title ?? "");
 			for (const m of messages) {
-				const md = safeJson$3(m.data) ?? {};
+				const md = safeJson$4(m.data) ?? {};
 				const role = String(md.role ?? "");
 				const msgParts = partsByMsg.get(String(m.id)) ?? [];
 				if (role === "user") {
@@ -1927,7 +1958,7 @@ var ZcodeAdapter = class {
 						clientVersion: sess.version ? String(sess.version) : void 0,
 						raw: {
 							parentId: sess.parent_id,
-							permission: safeJson$3(sess.permission)
+							permission: safeJson$4(sess.permission)
 						}
 					},
 					parent: sess.parent_id ? {
@@ -2513,7 +2544,7 @@ var DshAdapter = class {
 						kind: "tool-call",
 						callId: String(b.id ?? `call-${e.seq}`),
 						name: String(b.name ?? "tool"),
-						args: safeJson$2(b.arguments),
+						args: safeJson$3(b.arguments),
 						rawArgs: typeof b.arguments === "string" ? b.arguments : JSON.stringify(b.arguments ?? {}),
 						tier: "critical"
 					});
@@ -2774,7 +2805,7 @@ async function registerToWorkspace(sessionId, cwd) {
 		return;
 	}
 }
-function safeJson$2(s) {
+function safeJson$3(s) {
 	if (typeof s !== "string") return s ?? {};
 	try {
 		return JSON.parse(s);
@@ -3438,7 +3469,7 @@ var CodexAdapter = class {
 								kind: "tool-call",
 								callId: String(p.call_id ?? p.id ?? `call-${seq}`),
 								name: String(p.name ?? "tool"),
-								args: safeJson$1(p.arguments),
+								args: safeJson$2(p.arguments),
 								rawArgs: typeof p.arguments === "string" ? p.arguments : JSON.stringify(p.arguments ?? {}),
 								tier: "critical"
 							});
@@ -3648,7 +3679,7 @@ var CodexAdapter = class {
 		};
 	}
 };
-function safeJson$1(s) {
+function safeJson$2(s) {
 	if (typeof s !== "string") return s ?? {};
 	try {
 		return JSON.parse(s);
@@ -4092,7 +4123,7 @@ var WorkbuddyAdapter = class {
 						kind: "tool-call",
 						callId: String(l.callId ?? `call-${seq}`),
 						name: String(l.name ?? "tool"),
-						args: safeJson(l.arguments),
+						args: safeJson$1(l.arguments),
 						rawArgs: typeof l.arguments === "string" ? l.arguments : JSON.stringify(l.arguments ?? {}),
 						tier: "critical"
 					});
@@ -4277,6 +4308,358 @@ var WorkbuddyAdapter = class {
 		};
 	}
 };
+function safeJson$1(s) {
+	if (typeof s !== "string") return s ?? {};
+	try {
+		return JSON.parse(s);
+	} catch {
+		return {};
+	}
+}
+const workbuddyAdapter = new WorkbuddyAdapter();
+//#endregion
+//#region src/adapters/doubao/adapter.ts
+/**
+* adapters/doubao/adapter.ts —— 豆包（Doubao 桌面版）会话适配器
+*
+* 实测存储格式（2026-11-01，真实数据）：
+*   %LOCALAPPDATA%/Doubao/User Data/Default/.doubao/agent_mode/workspace/.sessions/<convId>/
+*     agents/<agentId>/system/trajectory.jsonl   —— 智能体轨迹（对话本体）
+*     agents/<agentId>/system/assignment.md      —— 带时间戳的追加需求记录（标题/时间来源）
+*     board.md / memory/MEMORY.md                —— 任务板与记忆（不解析）
+*
+* trajectory.jsonl 行型（OpenAI 风格，无逐行时间戳）：
+*   {"role":"user","content":"..."}
+*   {"role":"assistant","content":"...","tool_calls":[{"id","type":"function","function":{"name","arguments"(对象)}}]}
+*   {"role":"tool","content":"...","tool_call_id":"...","image_link_list":[...]?}
+*
+* 只读适配器：豆包是云端智能体会话，本地轨迹是运行时状态，
+* 写入不会在客户端界面出现（甚至可能干扰运行），故 canWrite=false。
+*/
+/** 智能体会话根目录（.sessions） */
+function doubaoAgentSessionsRoot() {
+	return path.join(doubaoUserData(), "Default", ".doubao", "agent_mode", "workspace", ".sessions");
+}
+/**
+* 解析 assignment.md：形如
+*   ## [2026-09-22T12:41:39.356Z] 需求
+*   <需求原文，可多行>
+* 返回按出现顺序的需求列表。
+*/
+function parseAssignment(md) {
+	const out = [];
+	if (!md) return out;
+	const lines = md.split("\n");
+	let current = null;
+	for (const line of lines) {
+		const m = line.match(/^##\s*\[([^\]]+)\]/);
+		if (m) {
+			if (current) out.push(current);
+			const t = Date.parse(m[1]);
+			current = {
+				ts: Number.isFinite(t) ? t : null,
+				text: ""
+			};
+			continue;
+		}
+		if (current && line.trim()) current.text = (current.text ? `${current.text} ` : "") + line.trim();
+	}
+	if (current) out.push(current);
+	for (const n of out) n.text = n.text.replace(/\s+/g, " ").slice(0, 200);
+	return out;
+}
+/** 找到会话目录下的第一个 agent 的 system 目录（实测每会话 1 个 agent） */
+function findAgentSystem(sessionDir) {
+	const agentsDir = path.join(sessionDir, "agents");
+	let agents = [];
+	try {
+		agents = fs.readdirSync(agentsDir);
+	} catch {
+		return null;
+	}
+	for (const a of agents) {
+		const systemDir = path.join(agentsDir, a, "system");
+		if (fs.existsSync(path.join(systemDir, "trajectory.jsonl"))) return {
+			systemDir,
+			agentId: a
+		};
+	}
+	return null;
+}
+/** 从 assignment.md 提取标题（第一条需求的文字） */
+function titleFromAssignment(md) {
+	const needs = parseAssignment(md);
+	for (const n of needs) if (n.text) return n.text.replace(/\s+/g, " ").slice(0, 80);
+	return "";
+}
+var DoubaoAdapter = class {
+	capability = {
+		client: "doubao",
+		label: "豆包",
+		canRead: true,
+		canWrite: false,
+		supportsSubagent: false,
+		supportsImage: true,
+		supportsFileChange: false,
+		supportsBranching: false,
+		lossyFields: [
+			"只读：豆包为云端智能体会话，不支持写入（可从豆包导出到其他端）",
+			"轨迹无逐行时间戳，轮次时间为按需求记录估算",
+			"图片仅为链接占位"
+		]
+	};
+	probe() {
+		const root = doubaoAgentSessionsRoot();
+		if (!fs.existsSync(root)) return {
+			available: false,
+			reason: `未找到豆包智能体会话目录：${root}`
+		};
+		return { available: true };
+	}
+	/**
+	* 概要缓存（速度优化）：与 DSH 适配器同一套 mtime+size 策略。
+	* 列表页用 assignment.md 提标题（小文件），不动 trajectory 全文。
+	*/
+	listCache = /* @__PURE__ */ new Map();
+	async list() {
+		const root = doubaoAgentSessionsRoot();
+		let convs = [];
+		try {
+			convs = fs.readdirSync(root).filter((n) => /^\d+$/.test(n));
+		} catch {
+			return [];
+		}
+		const out = [];
+		const liveKeys = /* @__PURE__ */ new Set();
+		for (const convId of convs) {
+			const sessionDir = path.join(root, convId);
+			const agent = findAgentSystem(sessionDir);
+			if (!agent) continue;
+			const trajFile = path.join(agent.systemDir, "trajectory.jsonl");
+			let st;
+			try {
+				st = fs.statSync(trajFile);
+			} catch {
+				continue;
+			}
+			const cacheKey = trajFile;
+			liveKeys.add(cacheKey);
+			const cached = this.listCache.get(cacheKey);
+			if (cached && cached.mtime === st.mtimeMs && cached.size === st.size) {
+				out.push(cached.summary);
+				continue;
+			}
+			let title = "";
+			const assignFile = path.join(agent.systemDir, "assignment.md");
+			try {
+				title = titleFromAssignment(fs.readFileSync(assignFile, "utf8"));
+			} catch {}
+			let createdAt = null;
+			if (!title || createdAt === null) {
+				const needs = (() => {
+					try {
+						return parseAssignment(fs.readFileSync(assignFile, "utf8"));
+					} catch {
+						return [];
+					}
+				})();
+				if (needs.length > 0 && needs[0].ts != null) createdAt = needs[0].ts;
+			}
+			let firstUser = "";
+			let userCount = 0;
+			try {
+				const text = fs.readFileSync(trajFile, "utf8");
+				for (const line of text.split("\n")) {
+					if (!line.includes("\"role\":\"user\"")) continue;
+					userCount++;
+					if (!firstUser) try {
+						const o = JSON.parse(line);
+						if (typeof o.content === "string" && o.content && !isInjectedTemplate(o.content)) firstUser = o.content.replace(/\s+/g, " ").slice(0, 80);
+					} catch {}
+				}
+			} catch {
+				continue;
+			}
+			const summary = {
+				client: "doubao",
+				id: convId,
+				title: title || firstUser || "(无标题)",
+				cwd: workspaceDirOf(sessionDir),
+				createdAt: createdAt ?? (Math.floor(st.birthtimeMs) || st.mtimeMs),
+				updatedAt: st.mtimeMs,
+				turns: userCount
+			};
+			this.listCache.set(cacheKey, {
+				mtime: st.mtimeMs,
+				size: st.size,
+				summary
+			});
+			out.push(summary);
+		}
+		for (const key of this.listCache.keys()) if (!liveKeys.has(key)) this.listCache.delete(key);
+		return out.sort((a, b) => b.updatedAt - a.updatedAt);
+	}
+	async read(opts) {
+		const root = doubaoAgentSessionsRoot();
+		const sessionDir = path.join(root, opts.sessionId);
+		if (!fs.existsSync(sessionDir)) throw new Error(`未找到豆包会话：${opts.sessionId}`);
+		const agent = findAgentSystem(sessionDir);
+		if (!agent) throw new Error(`豆包会话 ${opts.sessionId} 缺少智能体轨迹（agents/*/system/trajectory.jsonl）`);
+		const warnings = [];
+		const trajFile = path.join(agent.systemDir, "trajectory.jsonl");
+		const st = fs.statSync(trajFile);
+		const assignFile = path.join(agent.systemDir, "assignment.md");
+		let needs = [];
+		try {
+			needs = parseAssignment(fs.readFileSync(assignFile, "utf8"));
+		} catch {}
+		const lines = [];
+		for (const line of fs.readFileSync(trajFile, "utf8").split("\n")) {
+			if (!line.trim()) continue;
+			try {
+				lines.push(JSON.parse(line));
+			} catch {
+				warnings.push(`轨迹第 ${lines.length + 1} 行 JSON 损坏，已跳过`);
+			}
+		}
+		const userCount = lines.filter((l) => l.role === "user").length;
+		const alignTime = needs.length > 0 && needs.length === userCount;
+		if (!alignTime && needs.length > 0) warnings.push("豆包轨迹无逐行时间戳，且需求数与用户轮数不一致，轮次时间按会话起点估算");
+		const sessionStart = needs[0]?.ts ?? (Math.floor(st.birthtimeMs) || st.mtimeMs);
+		const turns = [];
+		let current = null;
+		let step = null;
+		let needIdx = 0;
+		const callNames = /* @__PURE__ */ new Map();
+		const title = needs.find((n) => n.text)?.text.slice(0, 80) ?? "";
+		const ensureTurn = (ts) => {
+			if (!current) {
+				current = {
+					index: turns.length,
+					startedAt: ts,
+					userMessages: [],
+					steps: []
+				};
+				turns.push(current);
+				step = null;
+			}
+			return current;
+		};
+		const ensureStep = (ts) => {
+			const t = ensureTurn(ts);
+			if (!step) {
+				step = {
+					index: t.steps.length,
+					blocks: []
+				};
+				t.steps.push(step);
+			}
+			return step;
+		};
+		for (const l of lines) {
+			const ts = alignTime && l.role === "user" && needs[needIdx]?.ts != null ? needs[needIdx].ts : sessionStart;
+			switch (l.role) {
+				case "user": {
+					const content = typeof l.content === "string" ? l.content : "";
+					if (!content) break;
+					current = {
+						index: turns.length,
+						startedAt: ts,
+						userMessages: [{
+							kind: "text",
+							role: "user",
+							text: content,
+							tier: classifyText(content, { injected: isInjectedTemplate(content) }),
+							injected: isInjectedTemplate(content)
+						}],
+						steps: []
+					};
+					turns.push(current);
+					step = null;
+					if (alignTime) needIdx++;
+					break;
+				}
+				case "assistant": {
+					ensureTurn(ts);
+					const s = ensureStep(ts);
+					if (typeof l.content === "string" && l.content) s.blocks.push({
+						kind: "text",
+						role: "assistant",
+						text: l.content,
+						tier: classifyText(l.content, {})
+					});
+					for (const tc of Array.isArray(l.tool_calls) ? l.tool_calls : []) {
+						const fn = tc?.function ?? {};
+						const callId = String(tc.id ?? `call-${turns.length}-${s.blocks.length}`);
+						const name = String(fn.name ?? "tool");
+						callNames.set(callId, name);
+						const rawArgs = typeof fn.arguments === "string" ? fn.arguments : JSON.stringify(fn.arguments ?? {});
+						s.blocks.push({
+							kind: "tool-call",
+							callId,
+							name,
+							args: typeof fn.arguments === "object" && fn.arguments != null ? fn.arguments : safeJson(fn.arguments),
+							rawArgs,
+							tier: "critical"
+						});
+					}
+					break;
+				}
+				case "tool": {
+					const t = ensureTurn(ts);
+					const s = ensureStep(ts);
+					const callId = String(l.tool_call_id ?? `call-${t.index}-${s.blocks.length}`);
+					const out = typeof l.content === "string" ? l.content : String(l.content ?? "");
+					if (Array.isArray(l.image_link_list) && l.image_link_list.length > 0) warnings.push("轨迹含图片链接（image_link_list），仅保留占位");
+					s.blocks.push({
+						kind: "tool-result",
+						callId,
+						name: callNames.get(callId),
+						output: {
+							text: out,
+							originalLength: out.length
+						},
+						isError: false,
+						tier: "critical"
+					});
+					break;
+				}
+				default: break;
+			}
+		}
+		return {
+			session: {
+				id: `doubao-${opts.sessionId}`,
+				title: title || "(无标题)",
+				cwd: workspaceDirOf(sessionDir),
+				createdAt: sessionStart,
+				updatedAt: st.mtimeMs,
+				origin: {
+					client: "doubao",
+					originalId: opts.sessionId,
+					raw: {
+						agentId: agent.agentId,
+						trajectory: trajFile
+					}
+				},
+				turns,
+				warnings
+			},
+			warnings
+		};
+	}
+	async write(_session, _opts = {}) {
+		throw new Error("豆包为云端智能体会话，暂不支持写入（可从豆包读取导出到其他端）");
+	}
+};
+/**
+* 会话的沙箱工作目录：豆包把每个会话的工作文件放在
+* ~/Doubao/chats/<日期>/<会话名>/ —— 与 .sessions 无 ID 关联，
+* 这里返回轨迹所在 .sessions 路径作为 cwd 兜底（UIR 要求非空 cwd）。
+*/
+function workspaceDirOf(sessionDir) {
+	return sessionDir;
+}
 function safeJson(s) {
 	if (typeof s !== "string") return s ?? {};
 	try {
@@ -4288,17 +4671,18 @@ function safeJson(s) {
 //#endregion
 //#region src/adapters/registry.ts
 /**
-* 全部五端的 UIR 适配器。
+* 全部六端的 UIR 适配器。
 *
 * 每个适配器都实现 `probe / list / read / write`，
-* 因此任意两端都能通过 `transferSession` 互转。
+* 因此可互转的任意两端都能通过 `transferSession` 互通（豆包只读）。
 */
 const ADAPTERS = {
 	"claude-code": claudeCodeAdapter,
 	zcode: zcodeAdapter,
 	dsh: dshAdapter,
 	codex: codexAdapter,
-	workbuddy: new WorkbuddyAdapter()
+	workbuddy: workbuddyAdapter,
+	doubao: new DoubaoAdapter()
 };
 /** 按客户端获取适配器 */
 function getAdapter(client) {
@@ -4380,10 +4764,11 @@ async function readSession(client, sessionId) {
 	}
 	return result;
 }
-/** 把 UIR 写入指定客户端（写回后失效该目标的读取缓存） */
+/** 把 UIR 写入指定客户端（写回后失效该目标的读取缓存；只读端给友好中文提示） */
 async function writeSession(client, session, opts = {}) {
 	const adapter = getAdapter(client);
 	if (!adapter) throw new Error(`客户端 ${client} 尚未支持 UIR 写入（当前支持：${availableAdapters().join(", ")}）`);
+	if (adapter.capability.canWrite === false) throw new Error(`${adapter.capability.label} 暂不支持写入（只读端），可从该端读取导出到其他端`);
 	const w = await adapter.write(session, opts);
 	if (w.ok) readCache.delete(`${client}\u0000${w.targetId}`);
 	return w;
@@ -4584,7 +4969,7 @@ function messagesToUir(params) {
 function registerTools(server) {
 	server.tool({
 		name: "list_clients",
-		description: "列出本机可用的编程客户端（DSH / Codex / Zcode / Claude Code / WorkBuddy）及其能力与损失提示。",
+		description: "列出本机可用的编程客户端（DSH / Codex / Zcode / Claude Code / WorkBuddy / 豆包）及其能力与损失提示。豆包为只读端（可导出，不可写入）。",
 		inputSchema: {
 			type: "object",
 			properties: {}
@@ -4623,9 +5008,10 @@ function registerTools(server) {
 						"codex",
 						"zcode",
 						"claude-code",
-						"workbuddy"
+						"workbuddy",
+						"doubao"
 					],
-					description: "只列某个客户端（可选）。不传则列全部五端。"
+					description: "只列某个客户端（可选）。不传则列全部六端。"
 				},
 				query: {
 					type: "string",
@@ -4684,7 +5070,8 @@ function registerTools(server) {
 						"codex",
 						"zcode",
 						"claude-code",
-						"workbuddy"
+						"workbuddy",
+						"doubao"
 					],
 					description: "会话所在的客户端。可选值见 enum；不确定有哪些可先调 list_clients。"
 				},
@@ -5009,7 +5396,7 @@ function registerTools(server) {
 function createBridgeMcpServer() {
 	const server = new McpServer({
 		name: "dsh-codex-bridge",
-		version: "0.3.0"
+		version: "0.4.0"
 	});
 	registerTools(server);
 	return server;
