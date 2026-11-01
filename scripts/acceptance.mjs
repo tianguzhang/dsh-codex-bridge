@@ -4,7 +4,7 @@
  * 用法（仓库根目录）：
  *   node --experimental-strip-types --import ./scripts/ts-register.mjs scripts/acceptance.mjs
  *
- * 检查 6 组目标：UI / 五端适配器 / MCP / 可移植性 / 构建部署 / 中文错误。
+ * 检查 6 组目标：UI / 六端适配器 / MCP / 可移植性 / 构建部署 / 中文错误。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -45,12 +45,12 @@ if (fs.existsSync(clientBundlePath)) {
   check('已部署 client bundle', false, `未找到 ${clientBundlePath}（请先运行 install.ps1）`);
 }
 
-// ════════ 目标 2：五端适配器 ════════
-console.log('\n════════ 目标 2：五端 UIR 适配器 ════════');
+// ════════ 目标 2：六端适配器 ════════
+console.log('\n════════ 目标 2：六端 UIR 适配器 ════════');
 const reg = await import(pathToFileURL(path.join(PLUGIN, 'src', 'adapters', 'registry.ts')).href);
 const adapters = reg.availableAdapters();
-check('五端全部注册', adapters.length === 5, adapters.join(', '));
-for (const c of ['dsh', 'codex', 'zcode', 'claude-code', 'workbuddy']) {
+check('六端全部注册', adapters.length === 6, adapters.join(', '));
+for (const c of ['dsh', 'codex', 'zcode', 'claude-code', 'workbuddy', 'doubao']) {
   check(`  ${c} 适配器文件`, fs.existsSync(path.join(PLUGIN, 'src', 'adapters', c, 'adapter.ts')));
 }
 const all = await reg.listAllSessions({ limitPerClient: 1 });
